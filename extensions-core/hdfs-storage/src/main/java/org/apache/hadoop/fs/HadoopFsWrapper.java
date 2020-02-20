@@ -19,7 +19,6 @@
 
 package /*CHECKSTYLE.OFF: PackageName*/org.apache.hadoop.fs/*CHECKSTYLE.ON: PackageName*/;
 
-import com.google.common.base.Throwables;
 import org.apache.druid.java.util.common.logger.Logger;
 
 import java.io.IOException;
@@ -36,7 +35,9 @@ public class HadoopFsWrapper
 {
   private static final Logger log = new Logger(HadoopFsWrapper.class);
 
-  private HadoopFsWrapper() {}
+  private HadoopFsWrapper()
+  {
+  }
 
   /**
    * Same as FileSystem.rename(from, to, Options.Rename). It is different from FileSystem.rename(from, to) which moves
@@ -54,7 +55,7 @@ public class HadoopFsWrapper
     try {
       // Note: Using reflection instead of simpler
       // fs.rename(from, to, Options.Rename.NONE);
-      // due to the issues discussed in https://github.com/apache/incubator-druid/pull/3787
+      // due to the issues discussed in https://github.com/apache/druid/pull/3787
       Method renameMethod = findRenameMethodRecursively(fs.getClass());
       renameMethod.invoke(fs, from, to, new Options.Rename[]{Options.Rename.NONE});
       return true;
@@ -64,7 +65,7 @@ public class HadoopFsWrapper
         log.info(ex, "Destination exists while renaming [%s] to [%s]", from, to);
         return false;
       } else {
-        throw Throwables.propagate(ex);
+        throw new RuntimeException(ex);
       }
     }
     catch (NoSuchMethodException | IllegalAccessException ex) {
@@ -72,7 +73,7 @@ public class HadoopFsWrapper
       for (Method method : fs.getClass().getDeclaredMethods()) {
         log.error(method.toGenericString());
       }
-      throw Throwables.propagate(ex);
+      throw new RuntimeException(ex);
     }
   }
 

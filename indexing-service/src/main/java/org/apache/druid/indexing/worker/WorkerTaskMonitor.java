@@ -27,6 +27,7 @@ import org.apache.curator.framework.recipes.cache.PathChildrenCache;
 import org.apache.curator.framework.recipes.cache.PathChildrenCacheEvent;
 import org.apache.curator.framework.recipes.cache.PathChildrenCacheListener;
 import org.apache.druid.client.indexing.IndexingService;
+import org.apache.druid.curator.CuratorUtils;
 import org.apache.druid.discovery.DruidLeaderClient;
 import org.apache.druid.indexer.TaskLocation;
 import org.apache.druid.indexer.TaskStatus;
@@ -101,7 +102,7 @@ public class WorkerTaskMonitor extends WorkerTaskManager
         registerRunListener();
         pathChildrenCache.start();
 
-        log.info("Started WorkerTaskMonitor.");
+        log.debug("Started WorkerTaskMonitor.");
         started = true;
       }
       catch (InterruptedException e) {
@@ -130,10 +131,11 @@ public class WorkerTaskMonitor extends WorkerTaskManager
           }
 
           if (completionStatus != null) {
-            log.info("Cleaning up stale announcement for task [%s]. New status is [%s].",
-                     announcement.getTaskStatus().getId(),
-                     completionStatus.getStatusCode()
-                     );
+            log.info(
+                "Cleaning up stale announcement for task [%s]. New status is [%s].",
+                announcement.getTaskStatus().getId(),
+                completionStatus.getStatusCode()
+            );
             workerCuratorCoordinator.updateTaskStatusAnnouncement(
                 TaskAnnouncement.create(
                     announcement.getTaskStatus().getId(),
@@ -156,12 +158,12 @@ public class WorkerTaskMonitor extends WorkerTaskManager
         new PathChildrenCacheListener()
         {
           @Override
-          public void childEvent(CuratorFramework curatorFramework, PathChildrenCacheEvent pathChildrenCacheEvent)
+          public void childEvent(CuratorFramework curatorFramework, PathChildrenCacheEvent event)
               throws Exception
           {
-            if (pathChildrenCacheEvent.getType().equals(PathChildrenCacheEvent.Type.CHILD_ADDED)) {
+            if (CuratorUtils.isChildAdded(event)) {
               final Task task = jsonMapper.readValue(
-                  cf.getData().forPath(pathChildrenCacheEvent.getData().getPath()),
+                  cf.getData().forPath(event.getData().getPath()),
                   Task.class
               );
 
@@ -185,7 +187,7 @@ public class WorkerTaskMonitor extends WorkerTaskManager
         started = false;
         pathChildrenCache.close();
 
-        log.info("Stopped WorkerTaskMonitor.");
+        log.debug("Stopped WorkerTaskMonitor.");
       }
       catch (Exception e) {
         log.makeAlert(e, "Exception stopping WorkerTaskMonitor")

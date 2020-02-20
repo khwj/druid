@@ -20,11 +20,9 @@
 package org.apache.druid.indexer.hadoop;
 
 import com.google.common.base.Function;
-import com.google.common.base.Throwables;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import com.google.common.io.Files;
-import org.apache.commons.io.FileUtils;
+import org.apache.druid.java.util.common.FileUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -46,7 +44,7 @@ public class FSSpideringIteratorTest
   {
     String[] testFiles = {"file1", "file2", "file3", "file4", "file5"};
 
-    File baseDir = Files.createTempDir();
+    File baseDir = FileUtils.createTempDir();
 
     try {
       new File(baseDir, "dir1").mkdir();
@@ -83,14 +81,14 @@ public class FSSpideringIteratorTest
       Assert.assertTrue(files.isEmpty());
     }
     catch (IOException e) {
-      Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
     finally {
       try {
         FileUtils.deleteDirectory(baseDir);
       }
       catch (IOException e) {
-        Throwables.propagate(e);
+        throw new RuntimeException(e);
       }
     }
   }

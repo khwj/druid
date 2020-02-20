@@ -19,7 +19,6 @@
 
 package org.apache.druid.cli;
 
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Binder;
 import com.google.inject.Injector;
@@ -72,7 +71,7 @@ public class ValidateSegments extends GuiceRunnable
       log.info("Segments [%s] and [%s] are identical", dir1, dir2);
     }
     catch (Exception e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -82,7 +81,7 @@ public class ValidateSegments extends GuiceRunnable
     return ImmutableList.of(
         // It's unknown if those modules are required in ValidateSegments.
         // Maybe some of those modules could be removed.
-        // See https://github.com/apache/incubator-druid/pull/4429#discussion_r123603498
+        // See https://github.com/apache/druid/pull/4429#discussion_r123603498
         new DruidProcessingModule(),
         new QueryableModule(),
         new QueryRunnerFactoryModule(),

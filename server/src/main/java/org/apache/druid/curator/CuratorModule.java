@@ -22,6 +22,8 @@ package org.apache.druid.curator;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Provides;
+import io.netty.util.SuppressForbidden;
+import org.apache.curator.RetryPolicy;
 import org.apache.curator.ensemble.EnsembleProvider;
 import org.apache.curator.ensemble.exhibitor.DefaultExhibitorRestClient;
 import org.apache.curator.ensemble.exhibitor.ExhibitorEnsembleProvider;
@@ -29,7 +31,6 @@ import org.apache.curator.ensemble.exhibitor.Exhibitors;
 import org.apache.curator.ensemble.fixed.FixedEnsembleProvider;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
-import org.apache.curator.framework.CuratorFrameworkFactory.Builder;
 import org.apache.curator.framework.api.ACLProvider;
 import org.apache.curator.framework.imps.DefaultACLProvider;
 import org.apache.curator.retry.BoundedExponentialBackoffRetry;
@@ -45,8 +46,6 @@ import org.apache.zookeeper.data.ACL;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
-/**
- */
 public class CuratorModule implements Module
 {
   static final String CURATOR_CONFIG_PREFIX = "druid.zk.service";
@@ -57,7 +56,7 @@ public class CuratorModule implements Module
 
   private static final int MAX_SLEEP_TIME_MS = 45000;
 
-  private static final int MAX_RETRIES = 30;
+  private static final int MAX_RETRIES = 29;
 
   private static final Logger log = new Logger(CuratorModule.class);
 
@@ -70,31 +69,31 @@ public class CuratorModule implements Module
 
   @Provides
   @LazySingleton
+  @SuppressForbidden(reason = "System#err")
   public CuratorFramework makeCurator(CuratorConfig config, EnsembleProvider ensembleProvider, Lifecycle lifecycle)
   {
-    final Builder builder = CuratorFrameworkFactory.builder();
+    final CuratorFrameworkFactory.Builder builder = CuratorFrameworkFactory.builder();
     if (!Strings.isNullOrEmpty(config.getZkUser()) && !Strings.isNullOrEmpty(config.getZkPwd())) {
       builder.authorization(
           config.getAuthScheme(),
           StringUtils.format("%s:%s", config.getZkUser(), config.getZkPwd()).getBytes(StandardCharsets.UTF_8)
       );
     }
+
+    RetryPolicy retryPolicy = new BoundedExponentialBackoffRetry(BASE_SLEEP_TIME_MS, MAX_SLEEP_TIME_MS, MAX_RETRIES);
+
     final CuratorFramework framework = builder
         .ensembleProvider(ensembleProvider)
         .sessionTimeoutMs(config.getZkSessionTimeoutMs())
-        .retryPolicy(new BoundedExponentialBackoffRetry(BASE_SLEEP_TIME_MS, MAX_SLEEP_TIME_MS, MAX_RETRIES))
+        .connectionTimeoutMs(config.getZkConnectionTimeoutMs())
+        .retryPolicy(retryPolicy)
         .compressionProvider(new PotentiallyGzippedCompressionProvider(config.getEnableCompression()))
         .aclProvider(config.getEnableAcl() ? new SecuredACLProvider() : new DefaultACLProvider())
         .build();
 
     framework.getUnhandledErrorListenable().addListener((message, e) -> {
-      log.error(e, "Unhandled error in Curator Framework");
-      try {
-        lifecycle.stop();
-      }
-      catch (Throwable t) {
-        log.warn(t, "Exception when stopping druid lifecycle");
-      }
+      log.error(e, "Unhandled error in Curator, stopping server.");
+      shutdown(lifecycle);
     });
 
     lifecycle.addHandler(
@@ -103,14 +102,14 @@ public class CuratorModule implements Module
           @Override
           public void start()
           {
-            log.info("Starting Curator");
+            log.debug("Starting Curator");
             framework.start();
           }
 
           @Override
           public void stop()
           {
-            log.info("Stopping Curator");
+            log.debug("Stopping Curator");
             framework.close();
           }
         }
@@ -127,6 +126,8 @@ public class CuratorModule implements Module
       return new FixedEnsembleProvider(config.getZkHosts());
     }
 
+    RetryPolicy retryPolicy = new BoundedExponentialBackoffRetry(BASE_SLEEP_TIME_MS, MAX_SLEEP_TIME_MS, MAX_RETRIES);
+
     return new ExhibitorEnsembleProvider(
         new Exhibitors(
             exConfig.getHosts(),
@@ -136,13 +137,13 @@ public class CuratorModule implements Module
         new DefaultExhibitorRestClient(exConfig.getUseSsl()),
         exConfig.getRestUriPath(),
         exConfig.getPollingMs(),
-        new BoundedExponentialBackoffRetry(BASE_SLEEP_TIME_MS, MAX_SLEEP_TIME_MS, MAX_RETRIES)
+        retryPolicy
     )
     {
       @Override
       public void start() throws Exception
       {
-        log.info("Poll the list of zookeeper servers for initial ensemble");
+        log.debug("Polling the list of ZooKeeper servers for the initial ensemble");
         this.pollForInitialEnsemble();
         super.start();
       }
@@ -151,14 +152,7 @@ public class CuratorModule implements Module
 
   private Exhibitors.BackupConnectionStringProvider newBackupProvider(final String zkHosts)
   {
-    return new Exhibitors.BackupConnectionStringProvider()
-    {
-      @Override
-      public String getBackupConnectionString()
-      {
-        return zkHosts;
-      }
-    };
+    return () -> zkHosts;
   }
 
   static class SecuredACLProvider implements ACLProvider
@@ -173,6 +167,20 @@ public class CuratorModule implements Module
     public List<ACL> getAclForPath(String path)
     {
       return ZooDefs.Ids.CREATOR_ALL_ACL;
+    }
+  }
+
+  private void shutdown(Lifecycle lifecycle)
+  {
+    //noinspection finally (not completing the 'finally' block normally is intentional)
+    try {
+      lifecycle.stop();
+    }
+    catch (Throwable t) {
+      log.error(t, "Exception when stopping server after unhandled Curator error.");
+    }
+    finally {
+      System.exit(1);
     }
   }
 }

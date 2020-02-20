@@ -21,7 +21,7 @@ package org.apache.druid.query.aggregation.datasketches.quantiles;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.yahoo.sketches.quantiles.DoublesSketch;
+import org.apache.datasketches.quantiles.DoublesSketch;
 import org.apache.druid.query.aggregation.Aggregator;
 import org.apache.druid.query.aggregation.AggregatorUtil;
 import org.apache.druid.query.aggregation.BufferAggregator;
@@ -45,7 +45,7 @@ public class DoublesSketchMergeAggregatorFactory extends DoublesSketchAggregator
   {
     final ColumnValueSelector<DoublesSketch> selector = metricFactory.makeColumnValueSelector(getFieldName());
     if (selector instanceof NilColumnValueSelector) {
-      return new DoublesSketchNoOpAggregator();
+      return new NoopDoublesSketchAggregator();
     }
     return new DoublesSketchMergeAggregator(selector, getK());
   }
@@ -55,7 +55,7 @@ public class DoublesSketchMergeAggregatorFactory extends DoublesSketchAggregator
   {
     final ColumnValueSelector<DoublesSketch> selector = metricFactory.makeColumnValueSelector(getFieldName());
     if (selector instanceof NilColumnValueSelector) {
-      return new DoublesSketchNoOpBufferAggregator();
+      return new NoopDoublesSketchBufferAggregator();
     }
     return new DoublesSketchMergeBufferAggregator(selector, getK(), getMaxIntermediateSizeWithNulls());
   }

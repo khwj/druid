@@ -25,11 +25,12 @@ import org.apache.druid.indexing.overlord.supervisor.Supervisor;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorSpec;
 
 import java.util.List;
+import java.util.Objects;
 
 public class TestSupervisorSpec implements SupervisorSpec
 {
-  private String id;
-  private Object data;
+  private final String id;
+  private final Object data;
 
   @JsonCreator
   public TestSupervisorSpec(@JsonProperty("id") String id, @JsonProperty("data") Object data)
@@ -57,9 +58,50 @@ public class TestSupervisorSpec implements SupervisorSpec
     return null;
   }
 
+  @Override
+  public String getType()
+  {
+    return null;
+  }
+
+  @Override
+  public String getSource()
+  {
+    return null;
+  }
+
   @JsonProperty
   public Object getData()
   {
     return data;
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    TestSupervisorSpec that = (TestSupervisorSpec) o;
+    return Objects.equals(id, that.id) &&
+           Objects.equals(data, that.data);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(id, data);
+  }
+
+  @Override
+  public String toString()
+  {
+    return "TestSupervisorSpec{" +
+           "id='" + id + '\'' +
+           ", data=" + data +
+           '}';
   }
 }

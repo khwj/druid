@@ -46,8 +46,6 @@ import org.joda.time.Years;
 import org.junit.Assert;
 import org.junit.Test;
 
-import java.net.URL;
-import java.net.URLClassLoader;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -317,7 +315,7 @@ public class QueryGranularityTest
   @Test
   public void testPeriodDaylightSaving()
   {
-    final DateTimeZone tz = DateTimes.inferTzfromString("America/Los_Angeles");
+    final DateTimeZone tz = DateTimes.inferTzFromString("America/Los_Angeles");
     final DateTime baseTime = new DateTime("2012-11-04T00:00:00", tz);
     assertSameInterval(
         Lists.newArrayList(
@@ -363,7 +361,7 @@ public class QueryGranularityTest
   @Test
   public void testIterableMonth()
   {
-    final DateTimeZone tz = DateTimes.inferTzfromString("America/Los_Angeles");
+    final DateTimeZone tz = DateTimes.inferTzFromString("America/Los_Angeles");
     final DateTime baseTime = new DateTime("2012-11-03T10:00:00", tz);
     assertSameInterval(
         Lists.newArrayList(
@@ -380,7 +378,7 @@ public class QueryGranularityTest
   @Test
   public void testIterableWeek()
   {
-    final DateTimeZone tz = DateTimes.inferTzfromString("America/Los_Angeles");
+    final DateTimeZone tz = DateTimes.inferTzFromString("America/Los_Angeles");
     final DateTime baseTime = new DateTime("2012-11-03T10:00:00", tz);
     assertSameInterval(
         Lists.newArrayList(
@@ -407,7 +405,7 @@ public class QueryGranularityTest
   @Test
   public void testPeriodTruncateDays()
   {
-    final DateTimeZone tz = DateTimes.inferTzfromString("America/Los_Angeles");
+    final DateTimeZone tz = DateTimes.inferTzFromString("America/Los_Angeles");
     final DateTime origin = DateTimes.of("2012-01-02T05:00:00.000-08:00");
     PeriodGranularity periodOrigin = new PeriodGranularity(
         new Period("P2D"),
@@ -487,7 +485,7 @@ public class QueryGranularityTest
   public void testCompoundPeriodTruncate()
   {
     {
-      final DateTimeZone tz = DateTimes.inferTzfromString("America/Los_Angeles");
+      final DateTimeZone tz = DateTimes.inferTzFromString("America/Los_Angeles");
       final DateTime origin = DateTimes.of("2012-01-02T05:00:00.000-08:00");
       PeriodGranularity periodOrigin = new PeriodGranularity(
           new Period("P1M2D"),
@@ -532,7 +530,7 @@ public class QueryGranularityTest
     }
 
     {
-      final DateTimeZone tz = DateTimes.inferTzfromString("America/Los_Angeles");
+      final DateTimeZone tz = DateTimes.inferTzFromString("America/Los_Angeles");
       final DateTime origin = DateTimes.of("2012-01-02T05:00:00.000-08:00");
       PeriodGranularity periodOrigin = new PeriodGranularity(
           new Period("PT12H5M"),
@@ -668,13 +666,13 @@ public class QueryGranularityTest
     Assert.assertEquals(new PeriodGranularity(
         new Period("P1D"),
         DateTimes.EPOCH,
-        DateTimes.inferTzfromString("America/Los_Angeles")
+        DateTimes.inferTzFromString("America/Los_Angeles")
     ), gran);
 
     PeriodGranularity expected = new PeriodGranularity(
         new Period("P1D"),
         DateTimes.of("2012-01-01"),
-        DateTimes.inferTzfromString("America/Los_Angeles")
+        DateTimes.inferTzFromString("America/Los_Angeles")
     );
 
     String jsonOut = mapper.writeValueAsString(expected);
@@ -801,17 +799,6 @@ public class QueryGranularityTest
     }
     Assert.assertFalse("actualIter not exhausted!?", actualIter.hasNext());
     Assert.assertFalse("expectedIter not exhausted!?", expectedIter.hasNext());
-  }
-
-  @Test(timeout = 60_000L)
-  public void testDeadLock() throws Exception
-  {
-    final URL[] urls = ((URLClassLoader) Granularity.class.getClassLoader()).getURLs();
-    final String className = Granularity.class.getCanonicalName();
-    for (int i = 0; i < 1000; ++i) {
-      final ClassLoader loader = new URLClassLoader(urls, null);
-      Assert.assertNotNull(String.valueOf(i), Class.forName(className, true, loader));
-    }
   }
   
   @Test

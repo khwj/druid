@@ -19,46 +19,44 @@
 
 package org.apache.druid.storage.azure;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.base.Throwables;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import com.microsoft.azure.storage.StorageException;
-import org.apache.druid.java.util.common.CompressionUtils;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.segment.SegmentUtils;
 import org.apache.druid.segment.loading.DataSegmentPusher;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.utils.CompressionUtils;
 import org.joda.time.format.ISODateTimeFormat;
 
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Used for writing segment files to Azure based deep storage
+ */
 public class AzureDataSegmentPusher implements DataSegmentPusher
 {
-
   private static final Logger log = new Logger(AzureDataSegmentPusher.class);
+  static final List<String> ALLOWED_PROPERTY_PREFIXES_FOR_HADOOP = ImmutableList.of("druid.azure");
   private final AzureStorage azureStorage;
   private final AzureAccountConfig config;
-  private final ObjectMapper jsonMapper;
 
   @Inject
   public AzureDataSegmentPusher(
       AzureStorage azureStorage,
-      AzureAccountConfig config,
-      ObjectMapper jsonMapper
+      AzureAccountConfig config
   )
   {
     this.azureStorage = azureStorage;
     this.config = config;
-    this.jsonMapper = jsonMapper;
   }
 
   @Deprecated
@@ -109,56 +107,7 @@ public class AzureDataSegmentPusher implements DataSegmentPusher
   @Override
   public List<String> getAllowedPropertyPrefixesForHadoop()
   {
-    return ImmutableList.of("druid.azure");
-  }
-
-  public File createSegmentDescriptorFile(final ObjectMapper jsonMapper, final DataSegment segment) throws
-                                                                                                    IOException
-  {
-    File descriptorFile = File.createTempFile("descriptor", ".json");
-    try (FileOutputStream stream = new FileOutputStream(descriptorFile)) {
-      stream.write(jsonMapper.writeValueAsBytes(segment));
-    }
-
-    return descriptorFile;
-  }
-
-  public Map<String, String> getAzurePaths(final DataSegment segment, final boolean useUniquePath)
-  {
-    final String storageDir = this.getStorageDir(segment, useUniquePath);
-
-    return ImmutableMap.of(
-        "index", StringUtils.format("%s/%s", storageDir, AzureStorageDruidModule.INDEX_ZIP_FILE_NAME),
-        "descriptor", StringUtils.format("%s/%s", storageDir, AzureStorageDruidModule.DESCRIPTOR_FILE_NAME)
-    );
-
-  }
-
-  public DataSegment uploadDataSegment(
-      DataSegment segment,
-      final int binaryVersion,
-      final long size,
-      final File compressedSegmentData,
-      final File descriptorFile,
-      final Map<String, String> azurePaths
-  )
-      throws StorageException, IOException, URISyntaxException
-  {
-    azureStorage.uploadBlob(compressedSegmentData, config.getContainer(), azurePaths.get("index"));
-    azureStorage.uploadBlob(descriptorFile, config.getContainer(), azurePaths.get("descriptor"));
-
-    final DataSegment outSegment = segment
-        .withSize(size)
-        .withLoadSpec(this.makeLoadSpec(new URI(azurePaths.get("index"))))
-        .withBinaryVersion(binaryVersion);
-
-    log.info("Deleting file [%s]", compressedSegmentData);
-    compressedSegmentData.delete();
-
-    log.info("Deleting file [%s]", descriptorFile);
-    descriptorFile.delete();
-
-    return outSegment;
+    return ALLOWED_PROPERTY_PREFIXES_FOR_HADOOP;
   }
 
   @Override
@@ -169,32 +118,25 @@ public class AzureDataSegmentPusher implements DataSegmentPusher
 
     final int binaryVersion = SegmentUtils.getVersionFromDir(indexFilesDir);
     File zipOutFile = null;
-    File descriptorFile = null;
 
     try {
       final File outFile = zipOutFile = File.createTempFile("index", ".zip");
       final long size = CompressionUtils.zip(indexFilesDir, zipOutFile);
 
-      final File descFile = descriptorFile = createSegmentDescriptorFile(jsonMapper, segment);
-      final Map<String, String> azurePaths = getAzurePaths(segment, useUniquePath);
+      final String azurePath = getAzurePath(segment, useUniquePath);
 
       return AzureUtils.retryAzureOperation(
-          () -> uploadDataSegment(segment, binaryVersion, size, outFile, descFile, azurePaths),
+          () -> uploadDataSegment(segment, binaryVersion, size, outFile, azurePath),
           config.getMaxTries()
       );
     }
     catch (Exception e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
     finally {
       if (zipOutFile != null) {
         log.info("Deleting zipped index File[%s]", zipOutFile);
         zipOutFile.delete();
-      }
-
-      if (descriptorFile != null) {
-        log.info("Deleting descriptor file[%s]", descriptorFile);
-        descriptorFile.delete();
       }
     }
   }
@@ -210,5 +152,37 @@ public class AzureDataSegmentPusher implements DataSegmentPusher
         "blobPath",
         uri.toString()
     );
+  }
+
+  @VisibleForTesting
+  String getAzurePath(final DataSegment segment, final boolean useUniquePath)
+  {
+    final String storageDir = this.getStorageDir(segment, useUniquePath);
+
+    return StringUtils.format("%s/%s", storageDir, AzureStorageDruidModule.INDEX_ZIP_FILE_NAME);
+
+  }
+
+  @VisibleForTesting
+  DataSegment uploadDataSegment(
+      DataSegment segment,
+      final int binaryVersion,
+      final long size,
+      final File compressedSegmentData,
+      final String azurePath
+  )
+      throws StorageException, IOException, URISyntaxException
+  {
+    azureStorage.uploadBlob(compressedSegmentData, config.getContainer(), azurePath);
+
+    final DataSegment outSegment = segment
+        .withSize(size)
+        .withLoadSpec(this.makeLoadSpec(new URI(azurePath)))
+        .withBinaryVersion(binaryVersion);
+
+    log.debug("Deleting file [%s]", compressedSegmentData);
+    compressedSegmentData.delete();
+
+    return outSegment;
   }
 }

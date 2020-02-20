@@ -24,7 +24,6 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.math.expr.Expr;
 import org.apache.druid.math.expr.ExprEval;
-import org.apache.druid.math.expr.Parser;
 import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
 import org.apache.druid.segment.ColumnValueSelector;
 
@@ -60,7 +59,7 @@ public class SingleLongInputCachingExpressionColumnValueSelector implements Colu
   )
   {
     // Verify expression has just one binding.
-    if (Parser.findRequiredBindings(expression).size() != 1) {
+    if (expression.analyzeInputs().getRequiredBindings().size() != 1) {
       throw new ISE("WTF?! Expected expression with just one binding");
     }
 
@@ -98,6 +97,10 @@ public class SingleLongInputCachingExpressionColumnValueSelector implements Colu
   @Override
   public ExprEval getObject()
   {
+    // things can still call this even when underlying selector is null (e.g. ExpressionColumnValueSelector#isNull)
+    if (selector.isNull()) {
+      return ExprEval.ofLong(null);
+    }
     // No assert for null handling, as the delegate selector already has it.
     final long input = selector.getLong();
     final boolean cached = input == lastInput && lastOutput != null;

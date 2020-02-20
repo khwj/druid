@@ -20,6 +20,7 @@
 package org.apache.druid.storage.azure;
 
 import com.microsoft.azure.storage.StorageException;
+import org.easymock.EasyMock;
 import org.easymock.EasyMockSupport;
 import org.junit.Test;
 
@@ -27,26 +28,45 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URISyntaxException;
 
-import static org.easymock.EasyMock.expect;
-
 public class AzureByteSourceTest extends EasyMockSupport
 {
+  private static final long NO_OFFSET = 0L;
+  private static final long OFFSET = 10L;
 
   @Test
-  public void openStreamTest() throws IOException, URISyntaxException, StorageException
+  public void test_openStream_withoutOffset_succeeds() throws IOException, URISyntaxException, StorageException
   {
     final String containerName = "container";
     final String blobPath = "/path/to/file";
     AzureStorage azureStorage = createMock(AzureStorage.class);
     InputStream stream = createMock(InputStream.class);
 
-    expect(azureStorage.getBlobInputStream(containerName, blobPath)).andReturn(stream);
+    EasyMock.expect(azureStorage.getBlobInputStream(NO_OFFSET, containerName, blobPath)).andReturn(stream);
 
     replayAll();
 
     AzureByteSource byteSource = new AzureByteSource(azureStorage, containerName, blobPath);
 
     byteSource.openStream();
+
+    verifyAll();
+  }
+
+  @Test
+  public void test_openStream_withOffset_succeeds() throws IOException, URISyntaxException, StorageException
+  {
+    final String containerName = "container";
+    final String blobPath = "/path/to/file";
+    AzureStorage azureStorage = createMock(AzureStorage.class);
+    InputStream stream = createMock(InputStream.class);
+
+    EasyMock.expect(azureStorage.getBlobInputStream(OFFSET, containerName, blobPath)).andReturn(stream);
+
+    replayAll();
+
+    AzureByteSource byteSource = new AzureByteSource(azureStorage, containerName, blobPath);
+
+    byteSource.openStream(10L);
 
     verifyAll();
   }
@@ -58,7 +78,7 @@ public class AzureByteSourceTest extends EasyMockSupport
     final String blobPath = "/path/to/file";
     AzureStorage azureStorage = createMock(AzureStorage.class);
 
-    expect(azureStorage.getBlobInputStream(containerName, blobPath)).andThrow(
+    EasyMock.expect(azureStorage.getBlobInputStream(NO_OFFSET, containerName, blobPath)).andThrow(
         new StorageException(
             "",
             "",

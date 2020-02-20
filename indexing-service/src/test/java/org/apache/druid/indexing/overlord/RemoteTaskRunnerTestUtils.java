@@ -23,7 +23,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
-import com.google.common.base.Throwables;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.retry.ExponentialBackoffRetry;
@@ -43,6 +42,7 @@ import org.apache.druid.indexing.overlord.setup.DefaultWorkerBehaviorConfig;
 import org.apache.druid.indexing.overlord.setup.WorkerBehaviorConfig;
 import org.apache.druid.indexing.worker.TaskAnnouncement;
 import org.apache.druid.indexing.worker.Worker;
+import org.apache.druid.indexing.worker.config.WorkerConfig;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.http.client.HttpClient;
 import org.apache.druid.server.initialization.IndexerZkConfig;
@@ -55,11 +55,11 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class RemoteTaskRunnerTestUtils
 {
-  static final Joiner joiner = Joiner.on("/");
-  static final String basePath = "/test/druid";
-  static final String announcementsPath = StringUtils.format("%s/indexer/announcements", basePath);
-  static final String tasksPath = StringUtils.format("%s/indexer/tasks", basePath);
-  static final String statusPath = StringUtils.format("%s/indexer/status", basePath);
+  static final Joiner JOINER = Joiner.on("/");
+  static final String BASE_PATH = "/test/druid";
+  static final String ANNOUNCEMENTS_PATH = StringUtils.format("%s/indexer/announcements", BASE_PATH);
+  static final String TASKS_PATH = StringUtils.format("%s/indexer/tasks", BASE_PATH);
+  static final String STATUS_PATH = StringUtils.format("%s/indexer/status", BASE_PATH);
   static final TaskLocation DUMMY_LOCATION = TaskLocation.create("dummy", 9000, -1);
 
   private TestingCluster testingCluster;
@@ -95,8 +95,8 @@ public class RemoteTaskRunnerTestUtils
                                 .build();
     cf.start();
     cf.blockUntilConnected();
-    cf.create().creatingParentsIfNeeded().forPath(basePath);
-    cf.create().creatingParentsIfNeeded().forPath(tasksPath);
+    cf.create().creatingParentsIfNeeded().forPath(BASE_PATH);
+    cf.create().creatingParentsIfNeeded().forPath(TASKS_PATH);
   }
 
   void tearDown() throws Exception
@@ -125,7 +125,7 @@ public class RemoteTaskRunnerTestUtils
               @Override
               public String getBase()
               {
-                return basePath;
+                return BASE_PATH;
               }
             }, null, null, null, null
         ),
@@ -147,14 +147,15 @@ public class RemoteTaskRunnerTestUtils
         workerId,
         workerId,
         capacity,
-        "0"
+        "0",
+        WorkerConfig.DEFAULT_CATEGORY
     );
 
     cf.create().creatingParentsIfNeeded().withMode(CreateMode.EPHEMERAL).forPath(
-        joiner.join(announcementsPath, workerId),
+        JOINER.join(ANNOUNCEMENTS_PATH, workerId),
         jsonMapper.writeValueAsBytes(worker)
     );
-    cf.create().creatingParentsIfNeeded().forPath(joiner.join(tasksPath, workerId));
+    cf.create().creatingParentsIfNeeded().forPath(JOINER.join(TASKS_PATH, workerId));
 
     return worker;
   }
@@ -162,16 +163,23 @@ public class RemoteTaskRunnerTestUtils
   void disableWorker(Worker worker) throws Exception
   {
     cf.setData().forPath(
-        joiner.join(announcementsPath, worker.getHost()),
-        jsonMapper.writeValueAsBytes(new Worker(worker.getScheme(), worker.getHost(), worker.getIp(), worker.getCapacity(), ""))
+        JOINER.join(ANNOUNCEMENTS_PATH, worker.getHost()),
+        jsonMapper.writeValueAsBytes(new Worker(
+            worker.getScheme(),
+            worker.getHost(),
+            worker.getIp(),
+            worker.getCapacity(),
+            "",
+            worker.getCategory()
+        ))
     );
   }
 
   void mockWorkerRunningTask(final String workerId, final Task task) throws Exception
   {
-    cf.delete().forPath(joiner.join(tasksPath, workerId, task.getId()));
+    cf.delete().forPath(JOINER.join(TASKS_PATH, workerId, task.getId()));
 
-    final String taskStatusPath = joiner.join(statusPath, workerId, task.getId());
+    final String taskStatusPath = JOINER.join(STATUS_PATH, workerId, task.getId());
     TaskAnnouncement taskAnnouncement = TaskAnnouncement.create(task, TaskStatus.running(task.getId()), DUMMY_LOCATION);
     cf.create()
       .creatingParentsIfNeeded()
@@ -187,23 +195,23 @@ public class RemoteTaskRunnerTestUtils
   void mockWorkerCompleteSuccessfulTask(final String workerId, final Task task) throws Exception
   {
     TaskAnnouncement taskAnnouncement = TaskAnnouncement.create(task, TaskStatus.success(task.getId()), DUMMY_LOCATION);
-    cf.setData().forPath(joiner.join(statusPath, workerId, task.getId()), jsonMapper.writeValueAsBytes(taskAnnouncement));
+    cf.setData().forPath(JOINER.join(STATUS_PATH, workerId, task.getId()), jsonMapper.writeValueAsBytes(taskAnnouncement));
   }
 
   void mockWorkerCompleteFailedTask(final String workerId, final Task task) throws Exception
   {
     TaskAnnouncement taskAnnouncement = TaskAnnouncement.create(task, TaskStatus.failure(task.getId()), DUMMY_LOCATION);
-    cf.setData().forPath(joiner.join(statusPath, workerId, task.getId()), jsonMapper.writeValueAsBytes(taskAnnouncement));
+    cf.setData().forPath(JOINER.join(STATUS_PATH, workerId, task.getId()), jsonMapper.writeValueAsBytes(taskAnnouncement));
   }
 
   boolean workerRunningTask(final String workerId, final String taskId)
   {
-    return pathExists(joiner.join(statusPath, workerId, taskId));
+    return pathExists(JOINER.join(STATUS_PATH, workerId, taskId));
   }
 
   boolean taskAnnounced(final String workerId, final String taskId)
   {
-    return pathExists(joiner.join(tasksPath, workerId, taskId));
+    return pathExists(JOINER.join(TASKS_PATH, workerId, taskId));
   }
 
   boolean pathExists(final String path)
@@ -218,7 +226,7 @@ public class RemoteTaskRunnerTestUtils
               return cf.checkExists().forPath(path) != null;
             }
             catch (Exception e) {
-              throw Throwables.propagate(e);
+              throw new RuntimeException(e);
             }
           }
 

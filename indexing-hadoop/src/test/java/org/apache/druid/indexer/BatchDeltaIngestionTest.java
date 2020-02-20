@@ -22,7 +22,6 @@ package org.apache.druid.indexer;
 import com.fasterxml.jackson.databind.InjectableValues;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
@@ -54,6 +53,7 @@ import org.apache.druid.segment.realtime.firehose.IngestSegmentFirehose;
 import org.apache.druid.segment.realtime.firehose.WindowedStorageAdapter;
 import org.apache.druid.segment.transform.TransformSpec;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.DataSegment.PruneSpecsHolder;
 import org.apache.druid.timeline.partition.HashBasedNumberedShardSpec;
 import org.joda.time.Interval;
 import org.junit.Assert;
@@ -83,7 +83,7 @@ public class BatchDeltaIngestionTest
     MAPPER.registerSubtypes(new NamedType(HashBasedNumberedShardSpec.class, "hashed"));
     InjectableValues inject = new InjectableValues.Std()
         .addValue(ObjectMapper.class, MAPPER)
-        .addValue(DataSegment.PruneLoadSpecHolder.class, DataSegment.PruneLoadSpecHolder.DEFAULT);
+        .addValue(PruneSpecsHolder.class, PruneSpecsHolder.DEFAULT);
     MAPPER.setInjectableValues(inject);
     INDEX_IO = HadoopDruidIndexerConfig.INDEX_IO;
 
@@ -103,7 +103,7 @@ public class BatchDeltaIngestionTest
           );
     }
     catch (IOException e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -162,7 +162,7 @@ public class BatchDeltaIngestionTest
   /**
    * By default re-indexing expects same aggregators as used by original indexing job. But, with additional flag
    * "useNewAggs" in DatasourcePathSpec, user can optionally have any set of aggregators.
-   * See https://github.com/apache/incubator-druid/issues/5277 .
+   * See https://github.com/apache/druid/issues/5277 .
    */
   @Test
   public void testReindexingWithNewAggregators() throws Exception
@@ -386,27 +386,11 @@ public class BatchDeltaIngestionTest
 
     Assert.assertTrue(segmentFolder.exists());
 
-    File descriptor = new File(segmentFolder, "descriptor.json");
     File indexZip = new File(segmentFolder, "index.zip");
-    Assert.assertTrue(descriptor.exists());
     Assert.assertTrue(indexZip.exists());
 
-    DataSegment dataSegment = MAPPER.readValue(descriptor, DataSegment.class);
-    Assert.assertEquals("website", dataSegment.getDataSource());
-    Assert.assertEquals(config.getSchema().getTuningConfig().getVersion(), dataSegment.getVersion());
-    Assert.assertEquals(INTERVAL_FULL, dataSegment.getInterval());
-    Assert.assertEquals("local", dataSegment.getLoadSpec().get("type"));
-    Assert.assertEquals(indexZip.getCanonicalPath(), dataSegment.getLoadSpec().get("path"));
-    Assert.assertEquals(expectedDimensions, dataSegment.getDimensions());
-    Assert.assertEquals(expectedMetrics, dataSegment.getMetrics());
-    Assert.assertEquals(Integer.valueOf(9), dataSegment.getBinaryVersion());
-
-    HashBasedNumberedShardSpec spec = (HashBasedNumberedShardSpec) dataSegment.getShardSpec();
-    Assert.assertEquals(0, spec.getPartitionNum());
-    Assert.assertEquals(1, spec.getPartitions());
-
     File tmpUnzippedSegmentDir = temporaryFolder.newFolder();
-    new LocalDataSegmentPuller().getSegmentFiles(dataSegment, tmpUnzippedSegmentDir);
+    new LocalDataSegmentPuller().getSegmentFiles(indexZip, tmpUnzippedSegmentDir);
 
     QueryableIndex index = INDEX_IO.loadIndex(tmpUnzippedSegmentDir);
     StorageAdapter adapter = new QueryableIndexStorageAdapter(index);
@@ -479,6 +463,7 @@ public class BatchDeltaIngestionTest
                 null,
                 null,
                 null,
+                null,
                 false,
                 false,
                 false,
@@ -491,6 +476,7 @@ public class BatchDeltaIngestionTest
                 null,
                 false,
                 false,
+                null,
                 null,
                 null,
                 null

@@ -20,7 +20,7 @@
 package org.apache.druid.cli;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.collect.Lists;
+import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import com.google.inject.Injector;
 import com.google.inject.Key;
@@ -52,7 +52,7 @@ import java.util.List;
 
 public class RouterJettyServerInitializer implements JettyServerInitializer
 {
-  private static List<String> UNSECURED_PATHS = Lists.newArrayList(
+  private static final List<String> UNSECURED_PATHS = ImmutableList.of(
       "/status/health",
       // JDBC authentication uses the JDBC connection context instead of HTTP headers, skip the normal auth checks.
       // The router will keep the connection context in the forwarded message, and the broker is responsible for
@@ -92,10 +92,13 @@ public class RouterJettyServerInitializer implements JettyServerInitializer
   public void initialize(Server server, Injector injector)
   {
     final ServletContextHandler root = new ServletContextHandler(ServletContextHandler.SESSIONS);
+    root.setInitParameter("org.eclipse.jetty.servlet.Default.dirAllowed", "false");
 
     root.addServlet(new ServletHolder(new DefaultServlet()), "/*");
 
-    root.addServlet(buildServletHolder(asyncQueryForwardingServlet, routerHttpClientConfig), "/druid/v2/*");
+    ServletHolder queryServletHolder = buildServletHolder(asyncQueryForwardingServlet, routerHttpClientConfig);
+    root.addServlet(queryServletHolder, "/druid/v2/*");
+    root.addServlet(queryServletHolder, "/druid/v1/lookups/*");
 
     if (managementProxyConfig.isEnabled()) {
       ServletHolder managementForwardingServletHolder = buildServletHolder(
@@ -107,14 +110,16 @@ public class RouterJettyServerInitializer implements JettyServerInitializer
       root.addServlet(managementForwardingServletHolder, "/proxy/*");
     }
 
+
     final ObjectMapper jsonMapper = injector.getInstance(Key.get(ObjectMapper.class, Json.class));
     final AuthenticatorMapper authenticatorMapper = injector.getInstance(AuthenticatorMapper.class);
 
     AuthenticationUtils.addSecuritySanityCheckFilter(root, jsonMapper);
 
-    // perform no-op authorization for these resources
-    AuthenticationUtils.addNoopAuthorizationFilters(root, UNSECURED_PATHS);
-    AuthenticationUtils.addNoopAuthorizationFilters(root, authConfig.getUnsecuredPaths());
+    // perform no-op authorization/authentication for these resources
+    AuthenticationUtils.addNoopAuthenticationAndAuthorizationFilters(root, UNSECURED_PATHS);
+    WebConsoleJettyServerInitializer.intializeServerForWebConsoleRoot(root);
+    AuthenticationUtils.addNoopAuthenticationAndAuthorizationFilters(root, authConfig.getUnsecuredPaths());
 
     final List<Authenticator> authenticators = authenticatorMapper.getAuthenticatorChain();
     AuthenticationUtils.addAuthenticationFilterChain(root, authenticators);
@@ -138,6 +143,7 @@ public class RouterJettyServerInitializer implements JettyServerInitializer
     final HandlerList handlerList = new HandlerList();
     handlerList.setHandlers(
         new Handler[]{
+            WebConsoleJettyServerInitializer.createWebConsoleRewriteHandler(),
             JettyServerInitUtils.getJettyRequestLogHandler(),
             JettyServerInitUtils.wrapWithDefaultGzipHandler(
                 root,

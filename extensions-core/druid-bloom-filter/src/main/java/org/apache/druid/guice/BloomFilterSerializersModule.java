@@ -27,9 +27,12 @@ import com.fasterxml.jackson.databind.deser.std.StdDeserializer;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.fasterxml.jackson.databind.ser.std.StdSerializer;
+import org.apache.druid.query.aggregation.bloom.BloomFilterAggregatorFactory;
+import org.apache.druid.query.aggregation.bloom.BloomFilterSerde;
 import org.apache.druid.query.filter.BloomDimFilter;
 import org.apache.druid.query.filter.BloomKFilter;
 import org.apache.druid.query.filter.BloomKFilterHolder;
+import org.apache.druid.segment.serde.ComplexMetrics;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -37,14 +40,19 @@ import java.io.IOException;
 
 public class BloomFilterSerializersModule extends SimpleModule
 {
-  public static String BLOOM_FILTER_TYPE_NAME = "bloom";
+  public static final String BLOOM_FILTER_TYPE_NAME = "bloom";
 
   public BloomFilterSerializersModule()
   {
-    registerSubtypes(new NamedType(BloomDimFilter.class, BLOOM_FILTER_TYPE_NAME));
+    registerSubtypes(
+        new NamedType(BloomDimFilter.class, BLOOM_FILTER_TYPE_NAME),
+        new NamedType(BloomFilterAggregatorFactory.class, BLOOM_FILTER_TYPE_NAME)
+    );
     addSerializer(BloomKFilter.class, new BloomKFilterSerializer());
     addDeserializer(BloomKFilter.class, new BloomKFilterDeserializer());
     addDeserializer(BloomKFilterHolder.class, new BloomKFilterHolderDeserializer());
+
+    ComplexMetrics.registerSerde(BLOOM_FILTER_TYPE_NAME, new BloomFilterSerde());
   }
 
   private static class BloomKFilterSerializer extends StdSerializer<BloomKFilter>

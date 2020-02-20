@@ -54,7 +54,7 @@ public class TimestampParseExprMacro implements ExprMacroTable.ExprMacro
     final DateTimeZone timeZone;
 
     if (args.size() > 2 && args.get(2).getLiteralValue() != null) {
-      timeZone = DateTimes.inferTzfromString((String) args.get(2).getLiteralValue());
+      timeZone = DateTimes.inferTzFromString((String) args.get(2).getLiteralValue());
     } else {
       timeZone = DateTimeZone.UTC;
     }
@@ -64,8 +64,13 @@ public class TimestampParseExprMacro implements ExprMacroTable.ExprMacro
         ? createDefaultParser(timeZone)
         : DateTimes.wrapFormatter(DateTimeFormat.forPattern(formatString).withZone(timeZone));
 
-    class TimestampParseExpr implements Expr
+    class TimestampParseExpr extends ExprMacroTable.BaseScalarUnivariateMacroFunctionExpr
     {
+      private TimestampParseExpr(Expr arg)
+      {
+        super(arg);
+      }
+
       @Nonnull
       @Override
       public ExprEval eval(final ObjectBinding bindings)
@@ -86,14 +91,14 @@ public class TimestampParseExprMacro implements ExprMacroTable.ExprMacro
       }
 
       @Override
-      public void visit(final Visitor visitor)
+      public Expr visit(Shuttle shuttle)
       {
-        arg.visit(visitor);
-        visitor.visit(this);
+        Expr newArg = arg.visit(shuttle);
+        return shuttle.visit(new TimestampParseExpr(newArg));
       }
     }
 
-    return new TimestampParseExpr();
+    return new TimestampParseExpr(arg);
   }
 
   /**

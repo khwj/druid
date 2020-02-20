@@ -142,7 +142,7 @@ public class TimeFilteringTest extends BaseFilterTest
     );
 
     String jsFn = "function(x) { return(x === 3 || x === 5) }";
-    assertFilterMatches(
+    assertFilterMatchesSkipVectorize(
         new JavaScriptDimFilter(ColumnHolder.TIME_COLUMN_NAME, jsFn, null, JavaScriptConfig.getEnabledInstance()),
         ImmutableList.of("3", "5")
     );
@@ -206,7 +206,7 @@ public class TimeFilteringTest extends BaseFilterTest
     );
 
     String jsFn = "function(x) { return(x === 'Wednesday' || x === 'Thursday') }";
-    assertFilterMatches(
+    assertFilterMatchesSkipVectorize(
         new JavaScriptDimFilter(ColumnHolder.TIME_COLUMN_NAME, jsFn, exfn, JavaScriptConfig.getEnabledInstance()),
         ImmutableList.of("2", "3")
     );
@@ -227,7 +227,7 @@ public class TimeFilteringTest extends BaseFilterTest
   {
     ExtractionFn exfn = new TimeFormatExtractionFn(
         "EEEE",
-        DateTimes.inferTzfromString("America/New_York"),
+        DateTimes.inferTzFromString("America/New_York"),
         "en",
         null,
         false
@@ -337,7 +337,7 @@ public class TimeFilteringTest extends BaseFilterTest
     // increment timestamp by 2 hours
     String timeBoosterJsFn = "function(x) { return(Number(x) + 7200000) }";
     ExtractionFn exFn = new JavaScriptExtractionFn(timeBoosterJsFn, true, JavaScriptConfig.getEnabledInstance());
-    assertFilterMatches(
+    assertFilterMatchesSkipVectorize(
         new IntervalDimFilter(
             "dim0",
             Collections.singletonList(Intervals.of("1970-01-01T02:00:00.001Z/1970-01-01T02:00:00.005Z")),

@@ -19,6 +19,7 @@
 
 package org.apache.druid.query.expression;
 
+import com.google.common.base.Preconditions;
 import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.IAE;
@@ -41,17 +42,17 @@ public class ExprUtils
     return NIL_BINDINGS;
   }
 
-  public static DateTimeZone toTimeZone(final Expr timeZoneArg)
+  static DateTimeZone toTimeZone(final Expr timeZoneArg)
   {
     if (!timeZoneArg.isLiteral()) {
       throw new IAE("Time zone must be a literal");
     }
 
     final Object literalValue = timeZoneArg.getLiteralValue();
-    return literalValue == null ? DateTimeZone.UTC : DateTimes.inferTzfromString((String) literalValue);
+    return literalValue == null ? DateTimeZone.UTC : DateTimes.inferTzFromString((String) literalValue);
   }
 
-  public static PeriodGranularity toPeriodGranularity(
+  static PeriodGranularity toPeriodGranularity(
       final Expr periodArg,
       @Nullable final Expr originArg,
       @Nullable final Expr timeZoneArg,
@@ -66,7 +67,7 @@ public class ExprUtils
       timeZone = null;
     } else {
       final String value = timeZoneArg.eval(bindings).asString();
-      timeZone = value != null ? DateTimes.inferTzfromString(value) : null;
+      timeZone = value != null ? DateTimes.inferTzFromString(value) : null;
     }
 
     if (originArg == null) {
@@ -87,4 +88,14 @@ public class ExprUtils
     return new PeriodGranularity(period, origin, timeZone);
   }
 
+  static String createErrMsg(String functionName, String msg)
+  {
+    String prefix = "Function[" + functionName + "] ";
+    return prefix + msg;
+  }
+
+  static void checkLiteralArgument(String functionName, Expr arg, String argName)
+  {
+    Preconditions.checkArgument(arg.isLiteral(), createErrMsg(functionName, argName + " arg must be a literal"));
+  }
 }

@@ -19,6 +19,7 @@
 
 package org.apache.druid.segment.realtime.appenderator;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
@@ -26,7 +27,6 @@ import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Stopwatch;
 import com.google.common.base.Supplier;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
@@ -37,14 +37,11 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
-import org.apache.commons.io.FileUtils;
 import org.apache.druid.client.cache.Cache;
-import org.apache.druid.client.cache.CacheConfig;
-import org.apache.druid.client.cache.CachePopulatorStats;
-import org.apache.druid.common.guava.ThreadRenamingCallable;
 import org.apache.druid.data.input.Committer;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.java.util.common.DateTimes;
+import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.Pair;
@@ -54,15 +51,12 @@ import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.java.util.emitter.EmittingLogger;
-import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryRunner;
-import org.apache.druid.query.QueryRunnerFactoryConglomerate;
 import org.apache.druid.query.QuerySegmentWalker;
 import org.apache.druid.query.SegmentDescriptor;
 import org.apache.druid.segment.IndexIO;
 import org.apache.druid.segment.IndexMerger;
-import org.apache.druid.segment.IndexSpec;
 import org.apache.druid.segment.QueryableIndex;
 import org.apache.druid.segment.QueryableIndexSegment;
 import org.apache.druid.segment.Segment;
@@ -75,6 +69,7 @@ import org.apache.druid.segment.realtime.FireDepartmentMetrics;
 import org.apache.druid.segment.realtime.FireHydrant;
 import org.apache.druid.segment.realtime.plumber.Sink;
 import org.apache.druid.server.coordination.DataSegmentAnnouncer;
+import org.apache.druid.timeline.CompactionState;
 import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.timeline.VersionedIntervalTimeline;
 import org.joda.time.Interval;
@@ -93,9 +88,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -104,16 +100,16 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
-/**
- */
 public class AppenderatorImpl implements Appenderator
 {
   private static final EmittingLogger log = new EmittingLogger(AppenderatorImpl.class);
   private static final int WARN_DELAY = 1000;
   private static final String IDENTIFIER_FILE_NAME = "identifier.json";
 
+  private final String myId;
   private final DataSchema schema;
   private final AppenderatorConfig tuningConfig;
+  private final boolean storeCompactionState;
   private final FireDepartmentMetrics metrics;
   private final DataSegmentPusher dataSegmentPusher;
   private final ObjectMapper objectMapper;
@@ -121,11 +117,15 @@ public class AppenderatorImpl implements Appenderator
   private final IndexIO indexIO;
   private final IndexMerger indexMerger;
   private final Cache cache;
-  private final Map<SegmentIdentifier, Sink> sinks = new ConcurrentHashMap<>();
-  private final Set<SegmentIdentifier> droppingSinks = Sets.newConcurrentHashSet();
-  private final VersionedIntervalTimeline<String, Sink> sinkTimeline = new VersionedIntervalTimeline<>(
-      String.CASE_INSENSITIVE_ORDER
-  );
+  /**
+   * This map needs to be concurrent because it's accessed and mutated from multiple threads: both the thread from where
+   * this Appenderator is used (and methods like {@link #add(SegmentIdWithShardSpec, InputRow, Supplier, boolean)} are
+   * called) and from {@link #persistExecutor}. It could also be accessed (but not mutated) potentially in the context
+   * of any thread from {@link #drop}.
+   */
+  private final ConcurrentMap<SegmentIdWithShardSpec, Sink> sinks = new ConcurrentHashMap<>();
+  private final Set<SegmentIdWithShardSpec> droppingSinks = Sets.newConcurrentHashSet();
+  private final VersionedIntervalTimeline<String, Sink> sinkTimeline;
   private final long maxBytesTuningConfig;
 
   private final QuerySegmentWalker texasRanger;
@@ -151,25 +151,34 @@ public class AppenderatorImpl implements Appenderator
 
   private volatile Throwable persistError;
 
+  /**
+   * This constructor allows the caller to provide its own SinkQuerySegmentWalker.
+   *
+   * The sinkTimeline is set to the sink timeline of the provided SinkQuerySegmentWalker.
+   * If the SinkQuerySegmentWalker is null, a new sink timeline is initialized.
+   *
+   * It is used by UnifiedIndexerAppenderatorsManager which allows queries on data associated with multiple
+   * Appenderators.
+   */
   AppenderatorImpl(
+      String id,
       DataSchema schema,
       AppenderatorConfig tuningConfig,
+      boolean storeCompactionState,
       FireDepartmentMetrics metrics,
       DataSegmentPusher dataSegmentPusher,
       ObjectMapper objectMapper,
-      QueryRunnerFactoryConglomerate conglomerate,
       DataSegmentAnnouncer segmentAnnouncer,
-      ServiceEmitter emitter,
-      ExecutorService queryExecutorService,
+      @Nullable SinkQuerySegmentWalker sinkQuerySegmentWalker,
       IndexIO indexIO,
       IndexMerger indexMerger,
-      Cache cache,
-      CacheConfig cacheConfig,
-      CachePopulatorStats cachePopulatorStats
+      Cache cache
   )
   {
+    this.myId = id;
     this.schema = Preconditions.checkNotNull(schema, "schema");
     this.tuningConfig = Preconditions.checkNotNull(tuningConfig, "tuningConfig");
+    this.storeCompactionState = storeCompactionState;
     this.metrics = Preconditions.checkNotNull(metrics, "metrics");
     this.dataSegmentPusher = Preconditions.checkNotNull(dataSegmentPusher, "dataSegmentPusher");
     this.objectMapper = Preconditions.checkNotNull(objectMapper, "objectMapper");
@@ -177,19 +186,23 @@ public class AppenderatorImpl implements Appenderator
     this.indexIO = Preconditions.checkNotNull(indexIO, "indexIO");
     this.indexMerger = Preconditions.checkNotNull(indexMerger, "indexMerger");
     this.cache = cache;
-    this.texasRanger = conglomerate == null ? null : new SinkQuerySegmentWalker(
-        schema.getDataSource(),
-        sinkTimeline,
-        objectMapper,
-        emitter,
-        conglomerate,
-        queryExecutorService,
-        Preconditions.checkNotNull(cache, "cache"),
-        cacheConfig,
-        cachePopulatorStats
-    );
+    this.texasRanger = sinkQuerySegmentWalker;
+
+    if (sinkQuerySegmentWalker == null) {
+      this.sinkTimeline = new VersionedIntervalTimeline<>(
+          String.CASE_INSENSITIVE_ORDER
+      );
+    } else {
+      this.sinkTimeline = sinkQuerySegmentWalker.getSinkTimeline();
+    }
+
     maxBytesTuningConfig = TuningConfigs.getMaxBytesInMemoryOrDefault(tuningConfig.getMaxBytesInMemory());
-    log.info("Created Appenderator for dataSource[%s].", schema.getDataSource());
+  }
+
+  @Override
+  public String getId()
+  {
+    return myId;
   }
 
   @Override
@@ -218,7 +231,7 @@ public class AppenderatorImpl implements Appenderator
 
   @Override
   public AppenderatorAddResult add(
-      final SegmentIdentifier identifier,
+      final SegmentIdWithShardSpec identifier,
       final InputRow row,
       @Nullable final Supplier<Committer> committerSupplier,
       final boolean allowIncrementalPersists
@@ -266,7 +279,7 @@ public class AppenderatorImpl implements Appenderator
 
     boolean isPersistRequired = false;
     boolean persist = false;
-    List<String> persistReasons = new ArrayList();
+    List<String> persistReasons = new ArrayList<>();
 
     if (!sink.canAppendRow()) {
       persist = true;
@@ -299,7 +312,7 @@ public class AppenderatorImpl implements Appenderator
     if (persist) {
       if (allowIncrementalPersists) {
         // persistAll clears rowsCurrentlyInMemory, no need to update it.
-        log.info("Persisting rows in memory due to: [%s]", String.join(",", persistReasons));
+        log.info("Flushing in-memory data to disk because %s.", String.join(",", persistReasons));
         Futures.addCallback(
             persistAll(committerSupplier == null ? null : committerSupplier.get()),
             new FutureCallback<Object>()
@@ -325,13 +338,13 @@ public class AppenderatorImpl implements Appenderator
   }
 
   @Override
-  public List<SegmentIdentifier> getSegments()
+  public List<SegmentIdWithShardSpec> getSegments()
   {
     return ImmutableList.copyOf(sinks.keySet());
   }
 
   @Override
-  public int getRowCount(final SegmentIdentifier identifier)
+  public int getRowCount(final SegmentIdWithShardSpec identifier)
   {
     final Sink sink = sinks.get(identifier);
 
@@ -361,7 +374,7 @@ public class AppenderatorImpl implements Appenderator
   }
 
   @VisibleForTesting
-  long getBytesInMemory(SegmentIdentifier identifier)
+  long getBytesInMemory(SegmentIdWithShardSpec identifier)
   {
     final Sink sink = sinks.get(identifier);
 
@@ -372,15 +385,20 @@ public class AppenderatorImpl implements Appenderator
     }
   }
 
-  private Sink getOrCreateSink(final SegmentIdentifier identifier)
+  private Sink getOrCreateSink(final SegmentIdWithShardSpec identifier)
   {
     Sink retVal = sinks.get(identifier);
 
     if (retVal == null) {
+      final Map<String, Object> indexSpecMap = objectMapper.convertValue(
+          tuningConfig.getIndexSpec(),
+          new TypeReference<Map<String, Object>>() {}
+      );
       retVal = new Sink(
           identifier.getInterval(),
           schema,
           identifier.getShardSpec(),
+          storeCompactionState ? new CompactionState(tuningConfig.getPartitionsSpec(), indexSpecMap) : null,
           identifier.getVersion(),
           tuningConfig.getMaxRowsInMemory(),
           maxBytesTuningConfig,
@@ -452,7 +470,7 @@ public class AppenderatorImpl implements Appenderator
 
         // Drop everything.
         final List<ListenableFuture<?>> futures = new ArrayList<>();
-        for (Map.Entry<SegmentIdentifier, Sink> entry : sinks.entrySet()) {
+        for (Map.Entry<SegmentIdWithShardSpec, Sink> entry : sinks.entrySet()) {
           futures.add(abandonSegment(entry.getKey(), entry.getValue(), true));
         }
 
@@ -466,7 +484,7 @@ public class AppenderatorImpl implements Appenderator
   }
 
   @Override
-  public ListenableFuture<?> drop(final SegmentIdentifier identifier)
+  public ListenableFuture<?> drop(final SegmentIdWithShardSpec identifier)
   {
     final Sink sink = sinks.get(identifier);
     if (sink != null) {
@@ -482,16 +500,17 @@ public class AppenderatorImpl implements Appenderator
     throwPersistErrorIfExists();
 
     final Map<String, Integer> currentHydrants = new HashMap<>();
-    final List<Pair<FireHydrant, SegmentIdentifier>> indexesToPersist = new ArrayList<>();
+    final List<Pair<FireHydrant, SegmentIdWithShardSpec>> indexesToPersist = new ArrayList<>();
     int numPersistedRows = 0;
     long bytesPersisted = 0L;
-    for (SegmentIdentifier identifier : sinks.keySet()) {
-      final Sink sink = sinks.get(identifier);
+    for (Map.Entry<SegmentIdWithShardSpec, Sink> entry : sinks.entrySet()) {
+      final SegmentIdWithShardSpec identifier = entry.getKey();
+      final Sink sink = entry.getValue();
       if (sink == null) {
         throw new ISE("No sink for identifier: %s", identifier);
       }
       final List<FireHydrant> hydrants = Lists.newArrayList(sink);
-      currentHydrants.put(identifier.getIdentifierAsString(), hydrants.size());
+      currentHydrants.put(identifier.toString(), hydrants.size());
       numPersistedRows += sink.getNumRowsInMemory();
       bytesPersisted += sink.getBytesInMemory();
 
@@ -499,7 +518,7 @@ public class AppenderatorImpl implements Appenderator
 
       for (FireHydrant hydrant : hydrants.subList(0, limit)) {
         if (!hydrant.hasSwapped()) {
-          log.info("Hydrant[%s] hasn't persisted yet, persisting. Segment[%s]", hydrant, identifier);
+          log.debug("Hydrant[%s] hasn't persisted yet, persisting. Segment[%s]", hydrant, identifier);
           indexesToPersist.add(Pair.of(hydrant, identifier));
         }
       }
@@ -509,26 +528,27 @@ public class AppenderatorImpl implements Appenderator
       }
     }
 
-    log.info("Submitting persist runnable for dataSource[%s]", schema.getDataSource());
+    log.debug("Submitting persist runnable for dataSource[%s]", schema.getDataSource());
 
-    final String threadName = StringUtils.format("%s-incremental-persist", schema.getDataSource());
     final Object commitMetadata = committer == null ? null : committer.getMetadata();
     final Stopwatch runExecStopwatch = Stopwatch.createStarted();
     final Stopwatch persistStopwatch = Stopwatch.createStarted();
     final ListenableFuture<Object> future = persistExecutor.submit(
-        new ThreadRenamingCallable<Object>(threadName)
+        new Callable<Object>()
         {
           @Override
-          public Object doCall() throws IOException
+          public Object call() throws IOException
           {
             try {
-              for (Pair<FireHydrant, SegmentIdentifier> pair : indexesToPersist) {
+              for (Pair<FireHydrant, SegmentIdWithShardSpec> pair : indexesToPersist) {
                 metrics.incrementRowOutputCount(persistHydrant(pair.lhs, pair.rhs));
               }
 
               if (committer != null) {
-                log.info(
-                    "Committing metadata[%s] for sinks[%s].", commitMetadata, Joiner.on(", ").join(
+                log.debug(
+                    "Committing metadata[%s] for sinks[%s].",
+                    commitMetadata,
+                    Joiner.on(", ").join(
                         currentHydrants.entrySet()
                                        .stream()
                                        .map(entry -> StringUtils.format(
@@ -557,6 +577,15 @@ public class AppenderatorImpl implements Appenderator
                   commitLock.unlock();
                 }
               }
+
+              log.info(
+                  "Flushed in-memory data with commit metadata [%s] for segments: %s",
+                  commitMetadata,
+                  indexesToPersist.stream()
+                                  .map(itp -> itp.rhs.asSegmentId().toString())
+                                  .distinct()
+                                  .collect(Collectors.joining(", "))
+              );
 
               // return null if committer is null
               return commitMetadata;
@@ -589,14 +618,14 @@ public class AppenderatorImpl implements Appenderator
   }
 
   @Override
-  public ListenableFuture<SegmentsAndMetadata> push(
-      final Collection<SegmentIdentifier> identifiers,
+  public ListenableFuture<SegmentsAndCommitMetadata> push(
+      final Collection<SegmentIdWithShardSpec> identifiers,
       @Nullable final Committer committer,
       final boolean useUniquePath
   )
   {
-    final Map<SegmentIdentifier, Sink> theSinks = new HashMap<>();
-    for (final SegmentIdentifier identifier : identifiers) {
+    final Map<SegmentIdWithShardSpec, Sink> theSinks = new HashMap<>();
+    for (final SegmentIdWithShardSpec identifier : identifiers) {
       final Sink sink = sinks.get(identifier);
       if (sink == null) {
         throw new ISE("No sink for identifier: %s", identifier);
@@ -611,16 +640,25 @@ public class AppenderatorImpl implements Appenderator
         // We should always persist all segments regardless of the input because metadata should be committed for all
         // segments.
         persistAll(committer),
-        (Function<Object, SegmentsAndMetadata>) commitMetadata -> {
+        (Function<Object, SegmentsAndCommitMetadata>) commitMetadata -> {
           final List<DataSegment> dataSegments = new ArrayList<>();
 
-          for (Map.Entry<SegmentIdentifier, Sink> entry : theSinks.entrySet()) {
+          log.debug(
+              "Building and pushing segments: %s",
+              theSinks.keySet().stream().map(SegmentIdWithShardSpec::toString).collect(Collectors.joining(", "))
+          );
+
+          for (Map.Entry<SegmentIdWithShardSpec, Sink> entry : theSinks.entrySet()) {
             if (droppingSinks.contains(entry.getKey())) {
-              log.info("Skipping push of currently-dropping sink[%s]", entry.getKey());
+              log.warn("Skipping push of currently-dropping sink[%s]", entry.getKey());
               continue;
             }
 
-            final DataSegment dataSegment = mergeAndPush(entry.getKey(), entry.getValue(), useUniquePath);
+            final DataSegment dataSegment = mergeAndPush(
+                entry.getKey(),
+                entry.getValue(),
+                useUniquePath
+            );
             if (dataSegment != null) {
               dataSegments.add(dataSegment);
             } else {
@@ -628,7 +666,7 @@ public class AppenderatorImpl implements Appenderator
             }
           }
 
-          return new SegmentsAndMetadata(dataSegments, commitMetadata);
+          return new SegmentsAndCommitMetadata(dataSegments, commitMetadata);
         },
         pushExecutor
     );
@@ -656,9 +694,15 @@ public class AppenderatorImpl implements Appenderator
    *
    * @return segment descriptor, or null if the sink is no longer valid
    */
-  private DataSegment mergeAndPush(final SegmentIdentifier identifier, final Sink sink, final boolean useUniquePath)
+  @Nullable
+  private DataSegment mergeAndPush(
+      final SegmentIdWithShardSpec identifier,
+      final Sink sink,
+      final boolean useUniquePath
+  )
   {
     // Bail out if this sink is null or otherwise not what we expect.
+    //noinspection ObjectEquality
     if (sinks.get(identifier) != sink) {
       log.warn("Sink for segment[%s] no longer valid, bailing out of mergeAndPush.", identifier);
       return null;
@@ -689,14 +733,15 @@ public class AppenderatorImpl implements Appenderator
         if (useUniquePath) {
           // Don't reuse the descriptor, because the caller asked for a unique path. Leave the old one as-is, since
           // it might serve some unknown purpose.
-          log.info("Pushing segment[%s] again with new unique path.", identifier);
+          log.debug(
+              "Segment[%s] already pushed, but we want a unique path, so will push again with a new path.",
+              identifier
+          );
         } else {
-          log.info("Segment[%s] already pushed.", identifier);
+          log.info("Segment[%s] already pushed, skipping.", identifier);
           return objectMapper.readValue(descriptorFile, DataSegment.class);
         }
       }
-
-      log.info("Pushing merged index for segment[%s].", identifier);
 
       removeDirectory(mergedTarget);
 
@@ -705,13 +750,15 @@ public class AppenderatorImpl implements Appenderator
       }
 
       final File mergedFile;
+      final long mergeFinishTime;
+      final long startTime = System.nanoTime();
       List<QueryableIndex> indexes = new ArrayList<>();
       Closer closer = Closer.create();
       try {
         for (FireHydrant fireHydrant : sink) {
           Pair<Segment, Closeable> segmentAndCloseable = fireHydrant.getAndIncrementSegment();
           final QueryableIndex queryableIndex = segmentAndCloseable.lhs.asQueryableIndex();
-          log.info("Adding hydrant[%s]", fireHydrant);
+          log.debug("Segment[%s] adding hydrant[%s]", identifier, fireHydrant);
           indexes.add(queryableIndex);
           closer.register(segmentAndCloseable.rhs);
         }
@@ -724,6 +771,10 @@ public class AppenderatorImpl implements Appenderator
             tuningConfig.getIndexSpec(),
             tuningConfig.getSegmentWriteOutMediumFactory()
         );
+
+        mergeFinishTime = System.nanoTime();
+
+        log.debug("Segment[%s] built in %,dms.", identifier, (mergeFinishTime - startTime) / 1000000);
       }
       catch (Throwable t) {
         throw closer.rethrow(t);
@@ -746,16 +797,29 @@ public class AppenderatorImpl implements Appenderator
           5
       );
 
+      final long pushFinishTime = System.nanoTime();
+
       objectMapper.writeValue(descriptorFile, segment);
 
-      log.info("Pushed merged index for segment[%s], descriptor is: %s", identifier, segment);
+      log.info(
+          "Segment[%s] of %,d bytes "
+          + "built from %d incremental persist(s) in %,dms; "
+          + "pushed to deep storage in %,dms. "
+          + "Load spec is: %s",
+          identifier,
+          segment.getSize(),
+          indexes.size(),
+          (mergeFinishTime - startTime) / 1000000,
+          (pushFinishTime - mergeFinishTime) / 1000000,
+          objectMapper.writeValueAsString(segment.getLoadSpec())
+      );
 
       return segment;
     }
     catch (Exception e) {
       metrics.incrementFailedHandoffs();
       log.warn(e, "Failed to push merged index for segment[%s].", identifier);
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -763,14 +827,14 @@ public class AppenderatorImpl implements Appenderator
   public void close()
   {
     if (!closed.compareAndSet(false, true)) {
-      log.info("Appenderator already closed");
+      log.debug("Appenderator already closed, skipping close() call.");
       return;
     }
 
-    log.info("Shutting down...");
+    log.debug("Shutting down...");
 
     final List<ListenableFuture<?>> futures = new ArrayList<>();
-    for (Map.Entry<SegmentIdentifier, Sink> entry : sinks.entrySet()) {
+    for (Map.Entry<SegmentIdWithShardSpec, Sink> entry : sinks.entrySet()) {
       futures.add(abandonSegment(entry.getKey(), entry.getValue(), false));
     }
 
@@ -824,18 +888,18 @@ public class AppenderatorImpl implements Appenderator
   public void closeNow()
   {
     if (!closed.compareAndSet(false, true)) {
-      log.info("Appenderator already closed");
+      log.debug("Appenderator already closed, skipping closeNow() call.");
       return;
     }
 
-    log.info("Shutting down immediately...");
-    for (Map.Entry<SegmentIdentifier, Sink> entry : sinks.entrySet()) {
+    log.debug("Shutting down immediately...");
+    for (Map.Entry<SegmentIdWithShardSpec, Sink> entry : sinks.entrySet()) {
       try {
         segmentAnnouncer.unannounceSegment(entry.getValue().getSegment());
       }
       catch (Exception e) {
         log.makeAlert(e, "Failed to unannounce segment[%s]", schema.getDataSource())
-           .addData("identifier", entry.getKey().getIdentifierAsString())
+           .addData("identifier", entry.getKey().toString())
            .emit();
       }
     }
@@ -875,7 +939,7 @@ public class AppenderatorImpl implements Appenderator
         }
       }
       catch (IOException e) {
-        throw Throwables.propagate(e);
+        throw new RuntimeException(e);
       }
     }
   }
@@ -890,7 +954,7 @@ public class AppenderatorImpl implements Appenderator
       }
     }
     catch (IOException e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -901,25 +965,21 @@ public class AppenderatorImpl implements Appenderator
     if (persistExecutor == null) {
       // use a blocking single threaded executor to throttle the firehose when write to disk is slow
       persistExecutor = MoreExecutors.listeningDecorator(
-          Execs.newBlockingSingleThreaded(
-              "appenderator_persist_%d", maxPendingPersists
-          )
+          Execs.newBlockingSingleThreaded("[" + myId + "]-appenderator-persist", maxPendingPersists)
       );
     }
+
     if (pushExecutor == null) {
       // use a blocking single threaded executor to throttle the firehose when write to disk is slow
       pushExecutor = MoreExecutors.listeningDecorator(
-          Execs.newBlockingSingleThreaded(
-              "appenderator_merge_%d", 1
-          )
+          Execs.newBlockingSingleThreaded("[" + myId + "]-appenderator-merge", 1)
       );
     }
+
     if (intermediateTempExecutor == null) {
       // use single threaded executor with SynchronousQueue so that all abandon operations occur sequentially
       intermediateTempExecutor = MoreExecutors.listeningDecorator(
-          Execs.newBlockingSingleThreaded(
-              "appenderator_abandon_%d", 0
-          )
+          Execs.newBlockingSingleThreaded("[" + myId + "]-appenderator-abandon", 0)
       );
     }
   }
@@ -929,9 +989,11 @@ public class AppenderatorImpl implements Appenderator
     if (persistExecutor != null) {
       persistExecutor.shutdownNow();
     }
+
     if (pushExecutor != null) {
       pushExecutor.shutdownNow();
     }
+
     if (intermediateTempExecutor != null) {
       intermediateTempExecutor.shutdownNow();
     }
@@ -982,7 +1044,16 @@ public class AppenderatorImpl implements Appenderator
 
     int rowsSoFar = 0;
 
-    log.info("Loading sinks from[%s]: %s", baseDir, committed.getHydrants().keySet());
+    if (committed.equals(Committed.nil())) {
+      log.debug("No previously committed metadata.");
+    } else {
+      log.info(
+          "Loading partially-persisted segments[%s] from[%s] with commit metadata: %s",
+          String.join(", ", committed.getHydrants().keySet()),
+          baseDir,
+          committed.getMetadata()
+      );
+    }
 
     for (File sinkDir : files) {
       final File identifierFile = new File(sinkDir, IDENTIFIER_FILE_NAME);
@@ -992,15 +1063,15 @@ public class AppenderatorImpl implements Appenderator
       }
 
       try {
-        final SegmentIdentifier identifier = objectMapper.readValue(
+        final SegmentIdWithShardSpec identifier = objectMapper.readValue(
             new File(sinkDir, "identifier.json"),
-            SegmentIdentifier.class
+            SegmentIdWithShardSpec.class
         );
 
-        final int committedHydrants = committed.getCommittedHydrants(identifier.getIdentifierAsString());
+        final int committedHydrants = committed.getCommittedHydrants(identifier.toString());
 
         if (committedHydrants <= 0) {
-          log.info("Removing uncommitted sink at [%s]", sinkDir);
+          log.info("Removing uncommitted segment at [%s].", sinkDir);
           FileUtils.deleteDirectory(sinkDir);
           continue;
         }
@@ -1020,20 +1091,17 @@ public class AppenderatorImpl implements Appenderator
           final int hydrantNumber = Integer.parseInt(hydrantDir.getName());
 
           if (hydrantNumber >= committedHydrants) {
-            log.info("Removing uncommitted segment at [%s]", hydrantDir);
+            log.info("Removing uncommitted partial segment at [%s]", hydrantDir);
             FileUtils.deleteDirectory(hydrantDir);
           } else {
-            log.info("Loading previously persisted segment at [%s]", hydrantDir);
+            log.debug("Loading previously persisted partial segment at [%s]", hydrantDir);
             if (hydrantNumber != hydrants.size()) {
               throw new ISE("Missing hydrant [%,d] in sinkDir [%s].", hydrants.size(), sinkDir);
             }
 
             hydrants.add(
                 new FireHydrant(
-                    new QueryableIndexSegment(
-                        identifier.getIdentifierAsString(),
-                        indexIO.loadIndex(hydrantDir)
-                    ),
+                    new QueryableIndexSegment(indexIO.loadIndex(hydrantDir), identifier.asSegmentId()),
                     hydrantNumber
                 )
             );
@@ -1049,6 +1117,7 @@ public class AppenderatorImpl implements Appenderator
             identifier.getInterval(),
             schema,
             identifier.getShardSpec(),
+            null,
             identifier.getVersion(),
             tuningConfig.getMaxRowsInMemory(),
             maxBytesTuningConfig,
@@ -1075,10 +1144,7 @@ public class AppenderatorImpl implements Appenderator
 
     // Make sure we loaded all committed sinks.
     final Set<String> loadedSinks = Sets.newHashSet(
-        Iterables.transform(
-            sinks.keySet(),
-            input -> input.getIdentifierAsString()
-        )
+        Iterables.transform(sinks.keySet(), SegmentIdWithShardSpec::toString)
     );
     final Set<String> missingSinks = Sets.difference(committed.getHydrants().keySet(), loadedSinks);
     if (!missingSinks.isEmpty()) {
@@ -1090,7 +1156,7 @@ public class AppenderatorImpl implements Appenderator
   }
 
   private ListenableFuture<?> abandonSegment(
-      final SegmentIdentifier identifier,
+      final SegmentIdWithShardSpec identifier,
       final Sink sink,
       final boolean removeOnDiskData
   )
@@ -1110,33 +1176,34 @@ public class AppenderatorImpl implements Appenderator
     // Wait for any outstanding pushes to finish, then abandon the segment inside the persist thread.
     return Futures.transform(
         pushBarrier(),
-        new Function<Object, Object>()
+        new Function<Object, Void>()
         {
           @Nullable
           @Override
-          public Object apply(@Nullable Object input)
+          public Void apply(@Nullable Object input)
           {
-            if (sinks.get(identifier) != sink) {
-              // Only abandon sink if it is the same one originally requested to be abandoned.
-              log.warn("Sink for segment[%s] no longer valid, not abandoning.", identifier);
+            if (!sinks.remove(identifier, sink)) {
+              log.error("Sink for segment[%s] no longer valid, not abandoning.", identifier);
               return null;
             }
 
+            metrics.setSinkCount(sinks.size());
+
             if (removeOnDiskData) {
               // Remove this segment from the committed list. This must be done from the persist thread.
-              log.info("Removing commit metadata for segment[%s].", identifier);
+              log.debug("Removing commit metadata for segment[%s].", identifier);
               try {
                 commitLock.lock();
                 final Committed oldCommit = readCommit();
                 if (oldCommit != null) {
-                  writeCommit(oldCommit.without(identifier.getIdentifierAsString()));
+                  writeCommit(oldCommit.without(identifier.toString()));
                 }
               }
               catch (Exception e) {
                 log.makeAlert(e, "Failed to update committed segments[%s]", schema.getDataSource())
-                   .addData("identifier", identifier.getIdentifierAsString())
+                   .addData("identifier", identifier.toString())
                    .emit();
-                throw Throwables.propagate(e);
+                throw new RuntimeException(e);
               }
               finally {
                 commitLock.unlock();
@@ -1149,13 +1216,10 @@ public class AppenderatorImpl implements Appenderator
             }
             catch (Exception e) {
               log.makeAlert(e, "Failed to unannounce segment[%s]", schema.getDataSource())
-                 .addData("identifier", identifier.getIdentifierAsString())
+                 .addData("identifier", identifier.toString())
                  .emit();
             }
 
-            log.info("Removing sink for segment[%s].", identifier);
-            sinks.remove(identifier);
-            metrics.setSinkCount(sinks.size());
             droppingSinks.remove(identifier);
             sinkTimeline.remove(
                 sink.getInterval(),
@@ -1172,6 +1236,8 @@ public class AppenderatorImpl implements Appenderator
             if (removeOnDiskData) {
               removeDirectory(computePersistDir(identifier));
             }
+
+            log.info("Dropped segment[%s].", identifier);
 
             return null;
           }
@@ -1209,25 +1275,25 @@ public class AppenderatorImpl implements Appenderator
     return new File(tuningConfig.getBasePersistDirectory(), ".lock");
   }
 
-  private File computePersistDir(SegmentIdentifier identifier)
+  private File computePersistDir(SegmentIdWithShardSpec identifier)
   {
-    return new File(tuningConfig.getBasePersistDirectory(), identifier.getIdentifierAsString());
+    return new File(tuningConfig.getBasePersistDirectory(), identifier.toString());
   }
 
-  private File computeIdentifierFile(SegmentIdentifier identifier)
+  private File computeIdentifierFile(SegmentIdWithShardSpec identifier)
   {
     return new File(computePersistDir(identifier), IDENTIFIER_FILE_NAME);
   }
 
-  private File computeDescriptorFile(SegmentIdentifier identifier)
+  private File computeDescriptorFile(SegmentIdWithShardSpec identifier)
   {
     return new File(computePersistDir(identifier), "descriptor.json");
   }
 
-  private File createPersistDirIfNeeded(SegmentIdentifier identifier) throws IOException
+  private File createPersistDirIfNeeded(SegmentIdWithShardSpec identifier) throws IOException
   {
     final File persistDir = computePersistDir(identifier);
-    FileUtils.forceMkdir(persistDir);
+    org.apache.commons.io.FileUtils.forceMkdir(persistDir);
 
     objectMapper.writeValue(computeIdentifierFile(identifier), identifier);
 
@@ -1243,48 +1309,56 @@ public class AppenderatorImpl implements Appenderator
    *
    * @return the number of rows persisted
    */
-  private int persistHydrant(FireHydrant indexToPersist, SegmentIdentifier identifier)
+  private int persistHydrant(FireHydrant indexToPersist, SegmentIdWithShardSpec identifier)
   {
     synchronized (indexToPersist) {
       if (indexToPersist.hasSwapped()) {
         log.info(
-            "Segment[%s], Hydrant[%s] already swapped. Ignoring request to persist.",
-            identifier, indexToPersist
+            "Segment[%s] hydrant[%s] already swapped. Ignoring request to persist.",
+            identifier,
+            indexToPersist
         );
         return 0;
       }
 
-      log.info("Segment[%s], persisting Hydrant[%s]", identifier, indexToPersist);
+      log.debug("Segment[%s], persisting Hydrant[%s]", identifier, indexToPersist);
 
       try {
+        final long startTime = System.nanoTime();
         int numRows = indexToPersist.getIndex().size();
 
         final File persistedFile;
         final File persistDir = createPersistDirIfNeeded(identifier);
-        final IndexSpec indexSpec = tuningConfig.getIndexSpec();
         persistedFile = indexMerger.persist(
             indexToPersist.getIndex(),
             identifier.getInterval(),
             new File(persistDir, String.valueOf(indexToPersist.getCount())),
-            indexSpec,
+            tuningConfig.getIndexSpecForIntermediatePersists(),
             tuningConfig.getSegmentWriteOutMediumFactory()
         );
 
-        indexToPersist.swapSegment(
-            new QueryableIndexSegment(
-                indexToPersist.getSegmentIdentifier(),
-                indexIO.loadIndex(persistedFile)
-            )
+        log.info(
+            "Flushed in-memory data for segment[%s] spill[%s] to disk in [%,d] ms (%,d rows).",
+            indexToPersist.getSegmentId(),
+            indexToPersist.getCount(),
+            (System.nanoTime() - startTime) / 1000000,
+            numRows
         );
+
+        indexToPersist.swapSegment(
+            new QueryableIndexSegment(indexIO.loadIndex(persistedFile), indexToPersist.getSegmentId())
+        );
+
         return numRows;
       }
       catch (IOException e) {
-        log.makeAlert("dataSource[%s] -- incremental persist failed", schema.getDataSource())
-           .addData("segment", identifier.getIdentifierAsString())
+        log.makeAlert("Incremental persist failed")
+           .addData("segment", identifier.toString())
+           .addData("dataSource", schema.getDataSource())
            .addData("count", indexToPersist.getCount())
            .emit();
 
-        throw Throwables.propagate(e);
+        throw new RuntimeException(e);
       }
     }
   }
@@ -1293,7 +1367,6 @@ public class AppenderatorImpl implements Appenderator
   {
     if (target.exists()) {
       try {
-        log.info("Deleting Index File[%s]", target);
         FileUtils.deleteDirectory(target);
       }
       catch (Exception e) {

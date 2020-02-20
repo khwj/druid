@@ -23,6 +23,7 @@ import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.Module;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.druid.indexing.kinesis.supervisor.KinesisSupervisorTuningConfig;
+import org.apache.druid.indexing.kinesis.test.TestModifiedKinesisIndexTaskTuningConfig;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.segment.IndexSpec;
 import org.apache.druid.segment.indexing.TuningConfig;
@@ -34,6 +35,7 @@ import org.junit.Test;
 import org.junit.rules.ExpectedException;
 
 import java.io.File;
+import java.io.IOException;
 
 public class KinesisIndexTaskTuningConfigTest
 {
@@ -65,7 +67,7 @@ public class KinesisIndexTaskTuningConfigTest
 
     Assert.assertNotNull(config.getBasePersistDirectory());
     Assert.assertEquals(1000000, config.getMaxRowsInMemory());
-    Assert.assertEquals(5_000_000, config.getMaxRowsPerSegment());
+    Assert.assertEquals(5_000_000, config.getMaxRowsPerSegment().intValue());
     Assert.assertEquals(new Period("PT10M"), config.getIntermediatePersistPeriod());
     Assert.assertEquals(0, config.getMaxPendingPersists());
     Assert.assertEquals(new IndexSpec(), config.getIndexSpec());
@@ -115,7 +117,7 @@ public class KinesisIndexTaskTuningConfigTest
 
     Assert.assertEquals(new File("/tmp/xxx"), config.getBasePersistDirectory());
     Assert.assertEquals(100, config.getMaxRowsInMemory());
-    Assert.assertEquals(100, config.getMaxRowsPerSegment());
+    Assert.assertEquals(100, config.getMaxRowsPerSegment().intValue());
     Assert.assertEquals(new Period("PT1H"), config.getIntermediatePersistPeriod());
     Assert.assertEquals(100, config.getMaxPendingPersists());
     Assert.assertTrue(config.getBuildV9Directly());
@@ -128,6 +130,123 @@ public class KinesisIndexTaskTuningConfigTest
     Assert.assertEquals(2, (int) config.getFetchThreads());
     Assert.assertTrue(config.isSkipSequenceNumberAvailabilityCheck());
     Assert.assertFalse(config.isResetOffsetAutomatically());
+  }
+
+  @Test
+  public void testSerdeWithModifiedTuningConfigAddedField() throws IOException
+  {
+    KinesisIndexTaskTuningConfig base = new KinesisIndexTaskTuningConfig(
+        1,
+        3L,
+        2,
+        100L,
+        new Period("PT3S"),
+        new File("/tmp/xxx"),
+        4,
+        new IndexSpec(),
+        new IndexSpec(),
+        true,
+        true,
+        5L,
+        true,
+        false,
+        1000,
+        1000,
+        500,
+        null,
+        42,
+        null,
+        false,
+        500,
+        500,
+        6000,
+        new Period("P3D")
+    );
+
+    String serialized = mapper.writeValueAsString(base);
+    TestModifiedKinesisIndexTaskTuningConfig deserialized =
+        mapper.readValue(serialized, TestModifiedKinesisIndexTaskTuningConfig.class);
+
+    Assert.assertEquals(null, deserialized.getExtra());
+    Assert.assertEquals(base.getMaxRowsInMemory(), deserialized.getMaxRowsInMemory());
+    Assert.assertEquals(base.getMaxBytesInMemory(), deserialized.getMaxBytesInMemory());
+    Assert.assertEquals(base.getMaxRowsPerSegment(), deserialized.getMaxRowsPerSegment());
+    Assert.assertEquals(base.getMaxTotalRows(), deserialized.getMaxTotalRows());
+    Assert.assertEquals(base.getIntermediatePersistPeriod(), deserialized.getIntermediatePersistPeriod());
+    Assert.assertEquals(base.getBasePersistDirectory(), deserialized.getBasePersistDirectory());
+    Assert.assertEquals(base.getMaxPendingPersists(), deserialized.getMaxPendingPersists());
+    Assert.assertEquals(base.getIndexSpec(), deserialized.getIndexSpec());
+    Assert.assertEquals(base.getBuildV9Directly(), deserialized.getBuildV9Directly());
+    Assert.assertEquals(base.isReportParseExceptions(), deserialized.isReportParseExceptions());
+    Assert.assertEquals(base.getHandoffConditionTimeout(), deserialized.getHandoffConditionTimeout());
+    Assert.assertEquals(base.isResetOffsetAutomatically(), deserialized.isResetOffsetAutomatically());
+    Assert.assertEquals(base.getSegmentWriteOutMediumFactory(), deserialized.getSegmentWriteOutMediumFactory());
+    Assert.assertEquals(base.getIntermediateHandoffPeriod(), deserialized.getIntermediateHandoffPeriod());
+    Assert.assertEquals(base.isLogParseExceptions(), deserialized.isLogParseExceptions());
+    Assert.assertEquals(base.getMaxParseExceptions(), deserialized.getMaxParseExceptions());
+    Assert.assertEquals(base.getMaxSavedParseExceptions(), deserialized.getMaxSavedParseExceptions());
+    Assert.assertEquals(base.getRecordBufferFullWait(), deserialized.getRecordBufferFullWait());
+    Assert.assertEquals(base.getRecordBufferOfferTimeout(), deserialized.getRecordBufferOfferTimeout());
+    Assert.assertEquals(base.getRecordBufferSize(), deserialized.getRecordBufferSize());
+    Assert.assertEquals(base.getMaxRecordsPerPoll(), deserialized.getMaxRecordsPerPoll());
+  }
+
+  @Test
+  public void testSerdeWithModifiedTuningConfigRemovedField() throws IOException
+  {
+    KinesisIndexTaskTuningConfig base = new KinesisIndexTaskTuningConfig(
+        1,
+        3L,
+        2,
+        100L,
+        new Period("PT3S"),
+        new File("/tmp/xxx"),
+        4,
+        new IndexSpec(),
+        new IndexSpec(),
+        true,
+        true,
+        5L,
+        true,
+        false,
+        1000,
+        1000,
+        500,
+        null,
+        42,
+        null,
+        false,
+        500,
+        500,
+        6000,
+        new Period("P3D")
+    );
+
+    String serialized = mapper.writeValueAsString(new TestModifiedKinesisIndexTaskTuningConfig(base, "loool"));
+    KinesisIndexTaskTuningConfig deserialized =
+        mapper.readValue(serialized, KinesisIndexTaskTuningConfig.class);
+
+    Assert.assertEquals(base.getMaxRowsInMemory(), deserialized.getMaxRowsInMemory());
+    Assert.assertEquals(base.getMaxBytesInMemory(), deserialized.getMaxBytesInMemory());
+    Assert.assertEquals(base.getMaxRowsPerSegment(), deserialized.getMaxRowsPerSegment());
+    Assert.assertEquals(base.getMaxTotalRows(), deserialized.getMaxTotalRows());
+    Assert.assertEquals(base.getIntermediatePersistPeriod(), deserialized.getIntermediatePersistPeriod());
+    Assert.assertEquals(base.getBasePersistDirectory(), deserialized.getBasePersistDirectory());
+    Assert.assertEquals(base.getMaxPendingPersists(), deserialized.getMaxPendingPersists());
+    Assert.assertEquals(base.getIndexSpec(), deserialized.getIndexSpec());
+    Assert.assertEquals(base.getBuildV9Directly(), deserialized.getBuildV9Directly());
+    Assert.assertEquals(base.isReportParseExceptions(), deserialized.isReportParseExceptions());
+    Assert.assertEquals(base.getHandoffConditionTimeout(), deserialized.getHandoffConditionTimeout());
+    Assert.assertEquals(base.isResetOffsetAutomatically(), deserialized.isResetOffsetAutomatically());
+    Assert.assertEquals(base.getSegmentWriteOutMediumFactory(), deserialized.getSegmentWriteOutMediumFactory());
+    Assert.assertEquals(base.getIntermediateHandoffPeriod(), deserialized.getIntermediateHandoffPeriod());
+    Assert.assertEquals(base.isLogParseExceptions(), deserialized.isLogParseExceptions());
+    Assert.assertEquals(base.getMaxParseExceptions(), deserialized.getMaxParseExceptions());
+    Assert.assertEquals(base.getMaxSavedParseExceptions(), deserialized.getMaxSavedParseExceptions());
+    Assert.assertEquals(base.getRecordBufferFullWait(), deserialized.getRecordBufferFullWait());
+    Assert.assertEquals(base.getRecordBufferOfferTimeout(), deserialized.getRecordBufferOfferTimeout());
+    Assert.assertEquals(base.getRecordBufferSize(), deserialized.getRecordBufferSize());
+    Assert.assertEquals(base.getMaxRecordsPerPoll(), deserialized.getMaxRecordsPerPoll());
   }
 
   @Test
@@ -171,6 +290,7 @@ public class KinesisIndexTaskTuningConfigTest
         new File("/tmp/xxx"),
         4,
         new IndexSpec(),
+        new IndexSpec(),
         true,
         true,
         5L,
@@ -191,13 +311,14 @@ public class KinesisIndexTaskTuningConfigTest
         null,
         null,
         null,
+        null,
         null
     );
     KinesisIndexTaskTuningConfig copy = (KinesisIndexTaskTuningConfig) original.convertToTaskTuningConfig();
 
     Assert.assertEquals(1, copy.getMaxRowsInMemory());
     Assert.assertEquals(3, copy.getMaxBytesInMemory());
-    Assert.assertEquals(2, copy.getMaxRowsPerSegment());
+    Assert.assertEquals(2, copy.getMaxRowsPerSegment().intValue());
     Assert.assertEquals(100L, (long) copy.getMaxTotalRows());
     Assert.assertEquals(new Period("PT3S"), copy.getIntermediatePersistPeriod());
     Assert.assertEquals(new File("/tmp/xxx"), copy.getBasePersistDirectory());

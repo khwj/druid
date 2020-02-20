@@ -25,6 +25,7 @@ import org.apache.druid.segment.IncrementalIndexSegment;
 import org.apache.druid.segment.ReferenceCountingSegment;
 import org.apache.druid.segment.Segment;
 import org.apache.druid.segment.incremental.IncrementalIndex;
+import org.apache.druid.timeline.SegmentId;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
@@ -39,11 +40,11 @@ public class FireHydrant
   private final AtomicReference<ReferenceCountingSegment> adapter;
   private volatile IncrementalIndex index;
 
-  public FireHydrant(IncrementalIndex index, int count, String segmentIdentifier)
+  public FireHydrant(IncrementalIndex index, int count, SegmentId segmentId)
   {
     this.index = index;
     this.adapter = new AtomicReference<>(
-        new ReferenceCountingSegment(new IncrementalIndexSegment(index, segmentIdentifier))
+        ReferenceCountingSegment.wrapRootGenerationSegment(new IncrementalIndexSegment(index, segmentId))
     );
     this.count = count;
   }
@@ -51,7 +52,7 @@ public class FireHydrant
   public FireHydrant(Segment adapter, int count)
   {
     this.index = null;
-    this.adapter = new AtomicReference<>(new ReferenceCountingSegment(adapter));
+    this.adapter = new AtomicReference<>(ReferenceCountingSegment.wrapRootGenerationSegment(adapter));
     this.count = count;
   }
 
@@ -60,9 +61,9 @@ public class FireHydrant
     return index;
   }
 
-  public String getSegmentIdentifier()
+  public SegmentId getSegmentId()
   {
-    return adapter.get().getIdentifier();
+    return adapter.get().getId();
   }
 
   public Interval getSegmentDataInterval()
@@ -109,19 +110,19 @@ public class FireHydrant
         return;
       }
       if (currentSegment != null && newSegment != null &&
-          !newSegment.getIdentifier().equals(currentSegment.getIdentifier())) {
+          !newSegment.getId().equals(currentSegment.getId())) {
         // Sanity check: identifier should not change
         throw new ISE(
             "WTF?! Cannot swap identifier[%s] -> [%s]!",
-            currentSegment.getIdentifier(),
-            newSegment.getIdentifier()
+            currentSegment.getId(),
+            newSegment.getId()
         );
       }
       if (currentSegment == newSegment) {
         throw new ISE("Cannot swap to the same segment");
       }
       ReferenceCountingSegment newReferenceCountingSegment =
-          newSegment != null ? new ReferenceCountingSegment(newSegment) : null;
+          newSegment != null ? ReferenceCountingSegment.wrapRootGenerationSegment(newSegment) : null;
       if (adapter.compareAndSet(currentSegment, newReferenceCountingSegment)) {
         if (currentSegment != null) {
           currentSegment.close();
@@ -144,7 +145,7 @@ public class FireHydrant
     // Do not include IncrementalIndex in toString as AbstractIndex.toString() actually prints
     // all the rows in the index
     return "FireHydrant{" +
-           ", queryable=" + adapter.get().getIdentifier() +
+           "queryable=" + adapter.get().getId() +
            ", count=" + count +
            '}';
   }

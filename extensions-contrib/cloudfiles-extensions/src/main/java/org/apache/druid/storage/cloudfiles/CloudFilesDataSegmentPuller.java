@@ -20,11 +20,11 @@
 package org.apache.druid.storage.cloudfiles;
 
 import com.google.inject.Inject;
-import org.apache.druid.java.util.common.CompressionUtils;
 import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.segment.loading.SegmentLoadingException;
+import org.apache.druid.utils.CompressionUtils;
 import org.jclouds.rackspace.cloudfiles.v1.CloudFilesApi;
 
 import java.io.File;
@@ -60,7 +60,7 @@ public class CloudFilesDataSegmentPuller
     }
     catch (Exception e) {
       try {
-        org.apache.commons.io.FileUtils.deleteDirectory(outDir);
+        FileUtils.deleteDirectory(outDir);
       }
       catch (IOException ioe) {
         log.warn(

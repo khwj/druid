@@ -20,14 +20,18 @@
 package org.apache.druid.java.util.common;
 
 import com.google.common.base.Strings;
-import com.google.common.base.Throwables;
 
 import javax.annotation.Nullable;
 import java.io.UnsupportedEncodingException;
+import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.nio.charset.Charset;
+import java.nio.charset.CharsetEncoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.IllegalFormatException;
 import java.util.Locale;
@@ -42,6 +46,8 @@ public class StringUtils
   @Deprecated // Charset parameters to String are currently slower than the charset's string name
   public static final Charset UTF8_CHARSET = StandardCharsets.UTF_8;
   public static final String UTF8_STRING = StandardCharsets.UTF_8.toString();
+  private static final Base64.Encoder BASE64_ENCODER = Base64.getEncoder();
+  private static final Base64.Decoder BASE64_DECODER = Base64.getDecoder();
 
   // should be used only for estimation
   // returns the same result with StringUtils.fromUtf8(value).length for valid string values
@@ -77,7 +83,7 @@ public class StringUtils
     }
     catch (UnsupportedEncodingException e) {
       // Should never happen
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -100,7 +106,45 @@ public class StringUtils
     }
     catch (UnsupportedEncodingException e) {
       // Should never happen
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
+    }
+  }
+
+  /**
+   * Encodes "string" into the buffer "byteBuffer", using no more than the number of bytes remaining in the buffer.
+   * Will only encode whole characters. The byteBuffer's position and limit may be changed during operation, but will
+   * be reset before this method call ends.
+   *
+   * @return the number of bytes written, which may be shorter than the full encoded string length if there
+   * is not enough room in the output buffer.
+   */
+  public static int toUtf8WithLimit(final String string, final ByteBuffer byteBuffer)
+  {
+    final CharsetEncoder encoder = StandardCharsets.UTF_8
+        .newEncoder()
+        .onMalformedInput(CodingErrorAction.REPLACE)
+        .onUnmappableCharacter(CodingErrorAction.REPLACE);
+
+    final int originalPosition = byteBuffer.position();
+    final int originalLimit = byteBuffer.limit();
+    final int maxBytes = byteBuffer.remaining();
+
+    try {
+      final char[] chars = string.toCharArray();
+      final CharBuffer charBuffer = CharBuffer.wrap(chars);
+
+      // No reason to look at the CoderResult from the "encode" call; we can tell the number of transferred characters
+      // by looking at the output buffer's position.
+      encoder.encode(charBuffer, byteBuffer, true);
+
+      final int bytesWritten = byteBuffer.position() - originalPosition;
+
+      assert bytesWritten <= maxBytes;
+      return bytesWritten;
+    }
+    finally {
+      byteBuffer.position(originalPosition);
+      byteBuffer.limit(originalLimit);
     }
   }
 
@@ -153,14 +197,54 @@ public class StringUtils
     return s.toUpperCase(Locale.ENGLISH);
   }
 
-  public static String urlEncode(String s)
+  /**
+   * Encodes a String in application/x-www-form-urlencoded format, with one exception:
+   * "+" in the encoded form is replaced with "%20".
+   *
+   * application/x-www-form-urlencoded encodes spaces as "+", but we use this to encode non-form data as well.
+   *
+   * @param s String to be encoded
+   *
+   * @return application/x-www-form-urlencoded format encoded String, but with "+" replaced with "%20".
+   */
+  @Nullable
+  public static String urlEncode(@Nullable String s)
   {
+    if (s == null) {
+      return null;
+    }
+
     try {
-      return URLEncoder.encode(s, "UTF-8");
+      return StringUtils.replace(URLEncoder.encode(s, "UTF-8"), "+", "%20");
     }
     catch (UnsupportedEncodingException e) {
       throw new RuntimeException(e);
     }
+  }
+
+  @Nullable
+  public static String urlDecode(String s)
+  {
+    if (s == null) {
+      return null;
+    }
+
+    try {
+      return URLDecoder.decode(s, "UTF-8");
+    }
+    catch (UnsupportedEncodingException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  public static String maybeRemoveLeadingSlash(String s)
+  {
+    return s != null && s.startsWith("/") ? s.substring(1) : s;
+  }
+
+  public static String maybeRemoveTrailingSlash(String s)
+  {
+    return s != null && s.endsWith("/") ? s.substring(0, s.length() - 1) : s;
   }
 
   /**
@@ -284,6 +368,217 @@ public class StringUtils
    */
   public static String utf8Base64(String input)
   {
-    return fromUtf8(Base64.getEncoder().encode(toUtf8(input)));
+    return fromUtf8(encodeBase64(toUtf8(input)));
+  }
+
+  /**
+   * Convert an input byte array into a newly-allocated byte array using the {@link Base64} encoding scheme
+   *
+   * @param input The byte array to convert to base64
+   *
+   * @return the base64 of the input in byte array form
+   */
+  public static byte[] encodeBase64(byte[] input)
+  {
+    return BASE64_ENCODER.encode(input);
+  }
+
+  /**
+   * Convert an input byte array into a string using the {@link Base64} encoding scheme
+   *
+   * @param input The byte array to convert to base64
+   *
+   * @return the base64 of the input in string form
+   */
+  public static String encodeBase64String(byte[] input)
+  {
+    return BASE64_ENCODER.encodeToString(input);
+  }
+
+  /**
+   * Decode an input byte array using the {@link Base64} encoding scheme and return a newly-allocated byte array
+   *
+   * @param input The byte array to decode from base64
+   *
+   * @return a newly-allocated byte array
+   */
+  public static byte[] decodeBase64(byte[] input)
+  {
+    return BASE64_DECODER.decode(input);
+  }
+
+  /**
+   * Decode an input string using the {@link Base64} encoding scheme and return a newly-allocated byte array
+   *
+   * @param input The string to decode from base64
+   *
+   * @return a newly-allocated byte array
+   */
+  public static byte[] decodeBase64String(String input)
+  {
+    return BASE64_DECODER.decode(input);
+  }
+
+  /**
+   * Returns a string whose value is the concatenation of the
+   * string {@code s} repeated {@code count} times.
+   * <p>
+   * If count or length is zero then the empty string is returned.
+   * <p>
+   * This method may be used to create space padding for
+   * formatting text or zero padding for formatting numbers.
+   *
+   * @param count number of times to repeat
+   *
+   * @return A string composed of this string repeated
+   * {@code count} times or the empty string if count
+   * or length is zero.
+   *
+   * @throws IllegalArgumentException if the {@code count} is negative.
+   * @link https://bugs.openjdk.java.net/browse/JDK-8197594
+   */
+  public static String repeat(String s, int count)
+  {
+    if (count < 0) {
+      throw new IllegalArgumentException("count is negative, " + count);
+    }
+    if (count == 1) {
+      return s;
+    }
+    byte[] value = s.getBytes(StandardCharsets.UTF_8);
+    final int len = value.length;
+    if (len == 0 || count == 0) {
+      return "";
+    }
+    if (len == 1) {
+      final byte[] single = new byte[count];
+      Arrays.fill(single, value[0]);
+      return new String(single, StandardCharsets.UTF_8);
+    }
+    if (Integer.MAX_VALUE / count < len) {
+      throw new RuntimeException("The produced string is too large.");
+    }
+    final int limit = len * count;
+    final byte[] multiple = new byte[limit];
+    System.arraycopy(value, 0, multiple, 0, len);
+    int copied = len;
+    for (; copied < limit - copied; copied <<= 1) {
+      System.arraycopy(multiple, 0, multiple, copied, copied);
+    }
+    System.arraycopy(multiple, 0, multiple, copied, limit - copied);
+    return new String(multiple, StandardCharsets.UTF_8);
+  }
+
+  /**
+   * Returns the string left-padded with the string pad to a length of len characters.
+   * If str is longer than len, the return value is shortened to len characters.
+   * Lpad and rpad functions are migrated from flink's scala function with minor refactor
+   * https://github.com/apache/flink/blob/master/flink-table/flink-table-planner/src/main/scala/org/apache/flink/table/runtime/functions/ScalarFunctions.scala
+   *
+   * @param base The base string to be padded
+   * @param len  The length of padded string
+   * @param pad  The pad string
+   *
+   * @return the string left-padded with pad to a length of len
+   */
+  public static String lpad(String base, Integer len, String pad)
+  {
+    if (len < 0) {
+      return null;
+    } else if (len == 0) {
+      return "";
+    }
+
+    char[] data = new char[len];
+
+    // The length of the padding needed
+    int pos = Math.max(len - base.length(), 0);
+
+    // Copy the padding
+    for (int i = 0; i < pos; i += pad.length()) {
+      for (int j = 0; j < pad.length() && j < pos - i; j++) {
+        data[i + j] = pad.charAt(j);
+      }
+    }
+
+    // Copy the base
+    for (int i = 0; pos + i < len && i < base.length(); i++) {
+      data[pos + i] = base.charAt(i);
+    }
+
+    return new String(data);
+  }
+
+  /**
+   * Returns the string right-padded with the string pad to a length of len characters.
+   * If str is longer than len, the return value is shortened to len characters.
+   *
+   * @param base The base string to be padded
+   * @param len  The length of padded string
+   * @param pad  The pad string
+   *
+   * @return the string right-padded with pad to a length of len
+   */
+  public static String rpad(String base, Integer len, String pad)
+  {
+    if (len < 0) {
+      return null;
+    } else if (len == 0) {
+      return "";
+    }
+
+    char[] data = new char[len];
+
+    int pos = 0;
+
+    // Copy the base
+    for (; pos < base.length() && pos < len; pos++) {
+      data[pos] = base.charAt(pos);
+    }
+
+    // Copy the padding
+    for (; pos < len; pos += pad.length()) {
+      for (int i = 0; i < pad.length() && i < len - pos; i++) {
+        data[pos + i] = pad.charAt(i);
+      }
+    }
+
+    return new String(data);
+  }
+
+  /**
+   * Returns the string truncated to maxBytes.
+   * If given string input is shorter than maxBytes, then it remains the same.
+   *
+   * @param s        The input string to possibly be truncated
+   * @param maxBytes The max bytes that string input will be truncated to
+   *
+   * @return the string after truncated to maxBytes
+   */
+  @Nullable
+  public static String chop(@Nullable final String s, final int maxBytes)
+  {
+    if (s == null) {
+      return null;
+    } else {
+      // Shorten firstValue to what could fit in maxBytes as UTF-8.
+      final byte[] bytes = new byte[maxBytes];
+      final int len = StringUtils.toUtf8WithLimit(s, ByteBuffer.wrap(bytes));
+      return new String(bytes, 0, len, StandardCharsets.UTF_8);
+    }
+  }
+
+  /**
+   * Shorten "s" to "maxBytes" chars. Fast and loose because these are *chars* not *bytes*. Use
+   * {@link #chop(String, int)} for slower, but accurate chopping.
+   */
+  @Nullable
+  public static String fastLooseChop(@Nullable final String s, final int maxBytes)
+  {
+    if (s == null || s.length() <= maxBytes) {
+      return s;
+    } else {
+      return s.substring(0, maxBytes);
+    }
   }
 }

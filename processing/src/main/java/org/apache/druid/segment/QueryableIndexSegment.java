@@ -19,25 +19,28 @@
 
 package org.apache.druid.segment;
 
+import org.apache.druid.timeline.SegmentId;
 import org.joda.time.Interval;
 
 /**
-*/
+ */
 public class QueryableIndexSegment extends AbstractSegment
 {
   private final QueryableIndex index;
-  private final String identifier;
+  private final QueryableIndexStorageAdapter storageAdapter;
+  private final SegmentId segmentId;
 
-  public QueryableIndexSegment(final String segmentIdentifier, QueryableIndex index)
+  public QueryableIndexSegment(QueryableIndex index, final SegmentId segmentId)
   {
     this.index = index;
-    identifier = segmentIdentifier;
+    this.storageAdapter = new QueryableIndexStorageAdapter(index);
+    this.segmentId = segmentId;
   }
 
   @Override
-  public String getIdentifier()
+  public SegmentId getId()
   {
-    return identifier;
+    return segmentId;
   }
 
   @Override
@@ -55,7 +58,7 @@ public class QueryableIndexSegment extends AbstractSegment
   @Override
   public StorageAdapter asStorageAdapter()
   {
-    return new QueryableIndexStorageAdapter(index);
+    return storageAdapter;
   }
 
   @Override

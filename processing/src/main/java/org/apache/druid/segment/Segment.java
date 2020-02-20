@@ -20,17 +20,21 @@
 package org.apache.druid.segment;
 
 import org.apache.druid.guice.annotations.PublicApi;
+import org.apache.druid.timeline.SegmentId;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
 import java.io.Closeable;
 
 /**
+ * The difference between this class and {@link org.apache.druid.timeline.DataSegment} is that {@link
+ * org.apache.druid.timeline.DataSegment} contains the segment metadata only, while this class represents the actual
+ * body of segment data, queryable.
  */
 @PublicApi
 public interface Segment extends Closeable
 {
-  String getIdentifier();
+  SegmentId getId();
   Interval getDataInterval();
   @Nullable
   QueryableIndex asQueryableIndex();
@@ -53,5 +57,6 @@ public interface Segment extends Closeable
    * @param <T> desired interface
    * @return instance of clazz, or null if the interface is not supported by this segment
    */
+  @Nullable
   <T> T as(Class<T> clazz);
 }

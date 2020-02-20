@@ -27,7 +27,6 @@ import com.google.inject.Inject;
 import com.sun.jersey.spi.container.ResourceFilters;
 import org.apache.druid.server.coordinator.DruidCoordinator;
 import org.apache.druid.server.coordinator.LoadQueuePeon;
-import org.apache.druid.server.coordinator.helper.CompactionSegmentIterator;
 import org.apache.druid.server.http.security.StateResourceFilter;
 import org.apache.druid.timeline.DataSegment;
 
@@ -91,11 +90,11 @@ public class CoordinatorResource
   )
   {
     if (simple != null) {
-      return Response.ok(coordinator.getSegmentAvailability()).build();
+      return Response.ok(coordinator.computeNumsUnavailableUsedSegmentsPerDataSource()).build();
     }
 
     if (full != null) {
-      return Response.ok(coordinator.getReplicationStatus()).build();
+      return Response.ok(coordinator.computeUnderReplicationCountsPerDataSourcePerTier()).build();
     }
     return Response.ok(coordinator.getLoadStatus()).build();
   }
@@ -150,36 +149,12 @@ public class CoordinatorResource
             new Function<LoadQueuePeon, Object>()
             {
               @Override
-              public Object apply(LoadQueuePeon input)
+              public Object apply(LoadQueuePeon peon)
               {
-                return new ImmutableMap.Builder<>()
-                    .put(
-                        "segmentsToLoad",
-                        Collections2.transform(
-                            input.getSegmentsToLoad(),
-                            new Function<DataSegment, Object>()
-                            {
-                              @Override
-                              public String apply(DataSegment segment)
-                              {
-                                return segment.getIdentifier();
-                              }
-                            }
-                        )
-                    )
-                    .put(
-                        "segmentsToDrop", Collections2.transform(
-                            input.getSegmentsToDrop(),
-                            new Function<DataSegment, Object>()
-                            {
-                              @Override
-                              public String apply(DataSegment segment)
-                              {
-                                return segment.getIdentifier();
-                              }
-                            }
-                        )
-                    )
+                return ImmutableMap
+                    .builder()
+                    .put("segmentsToLoad", Collections2.transform(peon.getSegmentsToLoad(), DataSegment::getId))
+                    .put("segmentsToDrop", Collections2.transform(peon.getSegmentsToDrop(), DataSegment::getId))
                     .build();
               }
             }
@@ -190,12 +165,12 @@ public class CoordinatorResource
   @GET
   @Path("/remainingSegmentSizeForCompaction")
   @Produces(MediaType.APPLICATION_JSON)
-  public Response remainingSegmentSizeForCompaction(
+  public Response getTotalSizeOfSegmentsAwaitingCompaction(
       @QueryParam("dataSource") String dataSource
   )
   {
-    final long notCompactedSegmentSizeBytes = coordinator.remainingSegmentSizeBytesForCompaction(dataSource);
-    if (notCompactedSegmentSizeBytes == CompactionSegmentIterator.UNKNOWN_REMAINING_SEGMENT_SIZE) {
+    final Long notCompactedSegmentSizeBytes = coordinator.getTotalSizeOfSegmentsAwaitingCompaction(dataSource);
+    if (notCompactedSegmentSizeBytes == null) {
       return Response.status(Status.BAD_REQUEST).entity(ImmutableMap.of("error", "unknown dataSource")).build();
     } else {
       return Response.ok(ImmutableMap.of("remainingSegmentSize", notCompactedSegmentSizeBytes)).build();

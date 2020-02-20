@@ -22,7 +22,6 @@ package org.apache.druid.indexing.overlord;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
@@ -51,6 +50,7 @@ import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QuerySegmentWalker;
 import org.apache.druid.query.SegmentDescriptor;
+import org.apache.druid.query.planning.DataSourceAnalysis;
 import org.apache.druid.server.DruidNode;
 import org.apache.druid.server.SetAndVerifyContextQueryRunner;
 import org.apache.druid.server.initialization.ServerConfig;
@@ -178,17 +178,15 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
     if (runningItem != null) {
       final Task task = runningItem.getTask();
       final long start = System.currentTimeMillis();
-      final boolean graceful;
       final long elapsed;
       boolean error = false;
 
-      if (taskConfig.isRestoreTasksOnRestart() && task.canRestore()) {
-        // Attempt graceful shutdown.
-        graceful = true;
-        log.info("Starting graceful shutdown of task[%s].", task.getId());
+      // stopGracefully for resource cleaning
+      log.info("Starting graceful shutdown of task[%s].", task.getId());
+      task.stopGracefully(taskConfig);
 
+      if (taskConfig.isRestoreTasksOnRestart() && task.canRestore()) {
         try {
-          task.stopGracefully();
           final TaskStatus taskStatus = runningItem.getResult().get(
               new Interval(DateTimes.utc(start), taskConfig.getGracefulShutdownTimeout()).toDurationMillis(),
               TimeUnit.MILLISECONDS
@@ -213,7 +211,6 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
           TaskRunnerUtils.notifyStatusChanged(listeners, task.getId(), TaskStatus.failure(task.getId()));
         }
       } else {
-        graceful = false;
         TaskRunnerUtils.notifyStatusChanged(listeners, task.getId(), TaskStatus.failure(task.getId()));
       }
 
@@ -223,7 +220,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
           .builder()
           .setDimension("task", task.getId())
           .setDimension("dataSource", task.getDataSource())
-          .setDimension("graceful", String.valueOf(graceful))
+          .setDimension("graceful", "true") // for backward compatibility
           .setDimension("error", String.valueOf(error));
 
       emitter.emit(metricBuilder.build("task/interrupt/count", 1L));
@@ -305,6 +302,12 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
   }
 
   @Override
+  public TaskLocation getTaskLocation(String taskId)
+  {
+    return location;
+  }
+
+  @Override
   public Optional<ScalingStats> getScalingStats()
   {
     return Optional.absent();
@@ -325,21 +328,17 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
   private <T> QueryRunner<T> getQueryRunnerImpl(Query<T> query)
   {
     QueryRunner<T> queryRunner = null;
-    final String queryDataSource = Iterables.getOnlyElement(query.getDataSource().getNames());
 
     if (runningItem != null) {
+      final DataSourceAnalysis analysis = DataSourceAnalysis.forDataSource(query.getDataSource());
       final Task task = runningItem.getTask();
-      if (task.getDataSource().equals(queryDataSource)) {
+
+      if (analysis.getBaseTableDataSource().isPresent()
+          && task.getDataSource().equals(analysis.getBaseTableDataSource().get().getName())) {
         final QueryRunner<T> taskQueryRunner = task.getQueryRunner(query);
 
         if (taskQueryRunner != null) {
-          if (queryRunner == null) {
-            queryRunner = taskQueryRunner;
-          } else {
-            log.makeAlert("Found too many query runners for datasource")
-               .addData("dataSource", queryDataSource)
-               .emit();
-          }
+          queryRunner = taskQueryRunner;
         }
       }
     }
@@ -382,7 +381,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
     {
       return task.getType();
     }
-    
+
     @Override
     public String getDataSource()
     {

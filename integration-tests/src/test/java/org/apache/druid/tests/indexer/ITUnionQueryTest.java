@@ -20,9 +20,11 @@
 package org.apache.druid.tests.indexer;
 
 import com.google.inject.Inject;
+import org.apache.commons.io.IOUtils;
 import org.apache.druid.curator.discovery.ServerDiscoveryFactory;
 import org.apache.druid.curator.discovery.ServerDiscoverySelector;
 import org.apache.druid.java.util.common.DateTimes;
+import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.java.util.common.logger.Logger;
@@ -34,22 +36,25 @@ import org.apache.druid.testing.IntegrationTestingConfig;
 import org.apache.druid.testing.clients.EventReceiverFirehoseTestClient;
 import org.apache.druid.testing.guice.DruidTestModuleFactory;
 import org.apache.druid.testing.guice.TestClient;
-import org.apache.druid.testing.utils.RetryUtil;
+import org.apache.druid.testing.utils.ITRetryUtil;
 import org.apache.druid.testing.utils.ServerDiscoveryUtil;
+import org.apache.druid.tests.TestNGGroup;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.jboss.netty.handler.codec.http.HttpResponseStatus;
 import org.joda.time.DateTime;
+import org.testng.annotations.BeforeSuite;
 import org.testng.annotations.Guice;
 import org.testng.annotations.Test;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 
+@Test(groups = TestNGGroup.QUERY)
 @Guice(moduleFactory = DruidTestModuleFactory.class)
 public class ITUnionQueryTest extends AbstractIndexerTest
 {
@@ -70,18 +75,26 @@ public class ITUnionQueryTest extends AbstractIndexerTest
   @Inject
   IntegrationTestingConfig config;
 
+  private String fullDatasourceName;
+
+  @BeforeSuite
+  public void setFullDatasourceName()
+  {
+    fullDatasourceName = UNION_DATASOURCE + config.getExtraDatasourceNameSuffix();
+  }
+
   @Test
   public void testUnionQuery() throws IOException
   {
     final int numTasks = 3;
     final Closer closer = Closer.create();
     for (int i = 0; i < numTasks; i++) {
-      closer.register(unloader(UNION_DATASOURCE + i));
+      closer.register(unloader(fullDatasourceName + i));
     }
     try {
       // Load 4 datasources with same dimensions
       String task = setShutOffTime(
-          getTaskAsString(UNION_TASK_RESOURCE),
+          getResourceAsString(UNION_TASK_RESOURCE),
           DateTimes.utc(System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(3))
       );
       List<String> taskIDs = new ArrayList<>();
@@ -89,7 +102,7 @@ public class ITUnionQueryTest extends AbstractIndexerTest
         taskIDs.add(
             indexer.submitTask(
                 withServiceName(
-                    withDataSource(task, UNION_DATASOURCE + i),
+                    withDataSource(task, fullDatasourceName + i),
                     EVENT_RECEIVER_SERVICE_PREFIX + i
                 )
             )
@@ -100,12 +113,12 @@ public class ITUnionQueryTest extends AbstractIndexerTest
       }
 
       // wait until all events are ingested
-      RetryUtil.retryUntil(
+      ITRetryUtil.retryUntil(
           () -> {
             for (int i = 0; i < numTasks; i++) {
-              final int countRows = queryHelper.countRows(UNION_DATASOURCE + i, "2013-08-31/2013-09-01");
+              final int countRows = queryHelper.countRows(fullDatasourceName + i, "2013-08-31/2013-09-01");
               if (countRows < 5) {
-                LOG.warn("%d events have been ingested to %s so far", countRows, UNION_DATASOURCE + i);
+                LOG.warn("%d events have been ingested to %s so far", countRows, fullDatasourceName + i);
                 return false;
               }
             }
@@ -119,7 +132,23 @@ public class ITUnionQueryTest extends AbstractIndexerTest
 
       // should hit the queries on realtime task
       LOG.info("Running Union Queries..");
-      this.queryHelper.testQueriesFromFile(UNION_QUERIES_RESOURCE, 2);
+
+      String queryResponseTemplate;
+      try {
+        InputStream is = AbstractITBatchIndexTest.class.getResourceAsStream(UNION_QUERIES_RESOURCE);
+        queryResponseTemplate = IOUtils.toString(is, StandardCharsets.UTF_8);
+      }
+      catch (IOException e) {
+        throw new ISE(e, "could not read query file: %s", UNION_QUERIES_RESOURCE);
+      }
+
+      queryResponseTemplate = StringUtils.replace(
+          queryResponseTemplate,
+          "%%DATASOURCE%%",
+          fullDatasourceName
+      );
+
+      this.queryHelper.testQueriesFromString(queryResponseTemplate, 2);
 
       // wait for the task to complete
       for (int i = 0; i < numTasks; i++) {
@@ -128,15 +157,8 @@ public class ITUnionQueryTest extends AbstractIndexerTest
       // task should complete only after the segments are loaded by historical node
       for (int i = 0; i < numTasks; i++) {
         final int taskNum = i;
-        RetryUtil.retryUntil(
-            new Callable<Boolean>()
-            {
-              @Override
-              public Boolean call()
-              {
-                return coordinator.areSegmentsLoaded(UNION_DATASOURCE + taskNum);
-              }
-            },
+        ITRetryUtil.retryUntil(
+            () -> coordinator.areSegmentsLoaded(fullDatasourceName + taskNum),
             true,
             10000,
             10,
@@ -144,7 +166,7 @@ public class ITUnionQueryTest extends AbstractIndexerTest
         );
       }
       // run queries on historical nodes
-      this.queryHelper.testQueriesFromFile(UNION_QUERIES_RESOURCE, 2);
+      this.queryHelper.testQueriesFromString(queryResponseTemplate, 2);
 
     }
     catch (Throwable e) {
@@ -162,7 +184,7 @@ public class ITUnionQueryTest extends AbstractIndexerTest
 
   private String withDataSource(String taskAsString, String dataSource)
   {
-    return StringUtils.replace(taskAsString, UNION_DATASOURCE, dataSource);
+    return StringUtils.replace(taskAsString, "%%DATASOURCE%%", dataSource);
   }
 
   private String withServiceName(String taskAsString, String serviceName)
@@ -170,7 +192,7 @@ public class ITUnionQueryTest extends AbstractIndexerTest
     return StringUtils.replace(taskAsString, EVENT_RECEIVER_SERVICE_PREFIX, serviceName);
   }
 
-  public void postEvents(int id) throws Exception
+  private void postEvents(int id) throws Exception
   {
     final ServerDiscoverySelector eventReceiverSelector = factory.createSelector(EVENT_RECEIVER_SERVICE_PREFIX + id);
     eventReceiverSelector.start();
@@ -182,13 +204,12 @@ public class ITUnionQueryTest extends AbstractIndexerTest
       LOG.info("Event Receiver Found at host [%s]", host);
 
       LOG.info("Checking worker /status/health for [%s]", host);
-      final StatusResponseHandler handler = new StatusResponseHandler(StandardCharsets.UTF_8);
-      RetryUtil.retryUntilTrue(
+      ITRetryUtil.retryUntilTrue(
           () -> {
             try {
               StatusResponseHolder response = httpClient.go(
                   new Request(HttpMethod.GET, new URL(StringUtils.format("https://%s/status/health", host))),
-                  handler
+                  StatusResponseHandler.getInstance()
               ).get();
               return response.getStatus().equals(HttpResponseStatus.OK);
             }

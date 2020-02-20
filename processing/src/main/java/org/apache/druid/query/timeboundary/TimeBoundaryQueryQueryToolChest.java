@@ -23,7 +23,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Functions;
-import com.google.common.base.Predicate;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.inject.Inject;
@@ -41,11 +41,14 @@ import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryToolChest;
 import org.apache.druid.query.Result;
 import org.apache.druid.query.aggregation.MetricManipulationFn;
+import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.timeline.LogicalSegment;
 
 import java.nio.ByteBuffer;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
+import java.util.function.BinaryOperator;
+import java.util.stream.Collectors;
 
 /**
  */
@@ -85,20 +88,10 @@ public class TimeBoundaryQueryQueryToolChest
     final T min = query.isMaxTime() ? null : segments.get(0);
     final T max = query.isMinTime() ? null : segments.get(segments.size() - 1);
 
-    return Lists.newArrayList(
-        Iterables.filter(
-            segments,
-            new Predicate<T>()
-            {
-              @Override
-              public boolean apply(T input)
-              {
-                return (min != null && input.getInterval().overlaps(min.getInterval())) ||
-                       (max != null && input.getInterval().overlaps(max.getInterval()));
-              }
-            }
-        )
-    );
+    return segments.stream()
+                   .filter(input -> (min != null && input.getInterval().overlaps(min.getTrueInterval())) ||
+                                    (max != null && input.getInterval().overlaps(max.getTrueInterval())))
+                   .collect(Collectors.toList());
   }
 
   @Override
@@ -112,7 +105,7 @@ public class TimeBoundaryQueryQueryToolChest
       protected Sequence<Result<TimeBoundaryResultValue>> doRun(
           QueryRunner<Result<TimeBoundaryResultValue>> baseRunner,
           QueryPlus<Result<TimeBoundaryResultValue>> input,
-          Map<String, Object> context
+          ResponseContext context
       )
       {
         TimeBoundaryQuery query = (TimeBoundaryQuery) input.getQuery();
@@ -121,6 +114,27 @@ public class TimeBoundaryQueryQueryToolChest
         );
       }
     };
+  }
+
+  @Override
+  public BinaryOperator<Result<TimeBoundaryResultValue>> createMergeFn(Query<Result<TimeBoundaryResultValue>> query)
+  {
+    TimeBoundaryQuery boundQuery = (TimeBoundaryQuery) query;
+    return (result1, result2) -> {
+      final List<Result<TimeBoundaryResultValue>> mergeList;
+      if (result1 == null) {
+        mergeList = result2 != null ? ImmutableList.of(result2) : null;
+      } else {
+        mergeList = result2 != null ? ImmutableList.of(result1, result2) : ImmutableList.of(result1);
+      }
+      return Iterables.getOnlyElement(boundQuery.mergeResults(mergeList));
+    };
+  }
+
+  @Override
+  public Comparator<Result<TimeBoundaryResultValue>> createResultComparator(Query<Result<TimeBoundaryResultValue>> query)
+  {
+    return query.getResultOrdering();
   }
 
   @Override
@@ -163,6 +177,12 @@ public class TimeBoundaryQueryQueryToolChest
                          .put(TIMEBOUNDARY_QUERY)
                          .put(cacheKey)
                          .array();
+      }
+
+      @Override
+      public byte[] computeResultLevelCacheKey(TimeBoundaryQuery query)
+      {
+        return computeCacheKey(query);
       }
 
       @Override

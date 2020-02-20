@@ -27,11 +27,11 @@ import org.apache.druid.data.input.FiniteFirehoseFactory;
 import org.apache.druid.data.input.InputSplit;
 import org.apache.druid.data.input.impl.StringInputRowParser;
 import org.apache.druid.data.input.impl.prefetch.PrefetchableTextFilesFirehoseFactory;
-import org.apache.druid.java.util.common.CompressionUtils;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.storage.cloudfiles.CloudFilesByteSource;
 import org.apache.druid.storage.cloudfiles.CloudFilesObjectApiProxy;
 import org.apache.druid.storage.cloudfiles.CloudFilesUtils;
+import org.apache.druid.utils.CompressionUtils;
 import org.jclouds.rackspace.cloudfiles.v1.CloudFilesApi;
 
 import java.io.IOException;
@@ -50,7 +50,7 @@ public class StaticCloudFilesFirehoseFactory extends PrefetchableTextFilesFireho
 
   @JsonCreator
   public StaticCloudFilesFirehoseFactory(
-      @JacksonInject("objectApi") CloudFilesApi cloudFilesApi,
+      @JacksonInject CloudFilesApi cloudFilesApi,
       @JsonProperty("blobs") List<CloudFilesBlob> blobs,
       @JsonProperty("maxCacheCapacityBytes") Long maxCacheCapacityBytes,
       @JsonProperty("maxFetchCapacityBytes") Long maxFetchCapacityBytes,

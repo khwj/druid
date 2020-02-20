@@ -22,7 +22,6 @@ package org.apache.druid.server.coordination;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.base.Function;
 import com.google.common.base.Functions;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.apache.druid.client.cache.CacheConfig;
@@ -55,6 +54,7 @@ import org.apache.druid.query.QueryRunnerFactoryConglomerate;
 import org.apache.druid.query.QueryToolChest;
 import org.apache.druid.query.Result;
 import org.apache.druid.query.aggregation.MetricManipulationFn;
+import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.query.search.SearchQuery;
 import org.apache.druid.query.search.SearchResultValue;
 import org.apache.druid.segment.AbstractSegment;
@@ -63,12 +63,14 @@ import org.apache.druid.segment.QueryableIndex;
 import org.apache.druid.segment.ReferenceCountingSegment;
 import org.apache.druid.segment.Segment;
 import org.apache.druid.segment.StorageAdapter;
+import org.apache.druid.segment.join.NoopJoinableFactory;
 import org.apache.druid.segment.loading.SegmentLoader;
 import org.apache.druid.segment.loading.SegmentLoadingException;
 import org.apache.druid.server.SegmentManager;
 import org.apache.druid.server.initialization.ServerConfig;
 import org.apache.druid.server.metrics.NoopServiceEmitter;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.partition.NoneShardSpec;
 import org.joda.time.Interval;
 import org.junit.Assert;
@@ -80,10 +82,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -122,7 +122,7 @@ public class ServerManagerTest
           }
 
           @Override
-          public Segment getSegment(final DataSegment segment)
+          public Segment getSegment(final DataSegment segment, boolean lazy)
           {
             return new SegmentForTesting(
                 MapUtils.getString(segment.getLoadSpec(), "version"),
@@ -159,6 +159,7 @@ public class ServerManagerTest
         new LocalCacheProvider().get(),
         new CacheConfig(),
         segmentManager,
+        NoopJoinableFactory.INSTANCE,
         new ServerConfig()
     );
 
@@ -416,7 +417,7 @@ public class ServerManagerTest
       factory.clearAdapters();
     }
     catch (Exception e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -446,8 +447,7 @@ public class ServerManagerTest
           @Override
           public void run()
           {
-            Map<String, Object> context = new HashMap<String, Object>();
-            Sequence<Result<SearchResultValue>> seq = runner.run(QueryPlus.wrap(query), context);
+            Sequence<Result<SearchResultValue>> seq = runner.run(QueryPlus.wrap(query));
             seq.toList();
             Iterator<SegmentForTesting> adaptersIter = factory.getAdapters().iterator();
 
@@ -480,7 +480,8 @@ public class ServerManagerTest
               NoneShardSpec.instance(),
               IndexIO.CURRENT_VERSION_ID,
               123L
-          )
+          ),
+          false
       );
     }
     catch (SegmentLoadingException e) {
@@ -581,7 +582,7 @@ public class ServerManagerTest
     @Override
     public QueryMetrics<Query<?>> makeMetrics(QueryType query)
     {
-      return new DefaultQueryMetrics<>(new DefaultObjectMapper());
+      return new DefaultQueryMetrics<>();
     }
 
     @Override
@@ -626,9 +627,9 @@ public class ServerManagerTest
     }
 
     @Override
-    public String getIdentifier()
+    public SegmentId getId()
     {
-      return version;
+      return SegmentId.dummy(version);
     }
 
     public boolean isClosed()
@@ -684,7 +685,7 @@ public class ServerManagerTest
     }
 
     @Override
-    public Sequence<T> run(QueryPlus<T> queryPlus, Map<String, Object> responseContext)
+    public Sequence<T> run(QueryPlus<T> queryPlus, ResponseContext responseContext)
     {
       return new BlockingSequence<>(runner.run(queryPlus, responseContext), waitLatch, waitYieldLatch, notifyLatch);
     }
@@ -723,7 +724,7 @@ public class ServerManagerTest
         waitYieldLatch.await(1000, TimeUnit.MILLISECONDS);
       }
       catch (Exception e) {
-        throw Throwables.propagate(e);
+        throw new RuntimeException(e);
       }
 
       final Yielder<OutType> baseYielder = baseSequence.toYielder(initValue, accumulator);
@@ -736,7 +737,7 @@ public class ServerManagerTest
             waitLatch.await(1000, TimeUnit.MILLISECONDS);
           }
           catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw new RuntimeException(e);
           }
           return baseYielder.get();
         }

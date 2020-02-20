@@ -23,11 +23,13 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.MoreExecutors;
 import org.apache.druid.client.ImmutableDruidDataSource;
 import org.apache.druid.client.ImmutableDruidServer;
+import org.apache.druid.client.ImmutableDruidServerTests;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.server.coordination.DruidServerMetadata;
 import org.apache.druid.server.coordination.ServerType;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.easymock.EasyMock;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
@@ -35,15 +37,18 @@ import org.junit.Assert;
 import org.junit.Test;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 public class CostBalancerStrategyTest
 {
-  private static final Interval day = Intervals.of("2015-01-01T00/2015-01-01T01");
+  private static final Interval DAY = Intervals.of("2015-01-01T00/2015-01-01T01");
 
   /**
    * Create Druid cluster with serverCount servers having maxSegments segments each, and 1 server with 98 segment
@@ -56,22 +61,24 @@ public class CostBalancerStrategyTest
     // Each having having 100 segments
     for (int i = 0; i < serverCount; i++) {
       LoadQueuePeonTester fromPeon = new LoadQueuePeonTester();
-      Map<String, DataSegment> segments = new HashMap<>();
-      for (int j = 0; j < maxSegments; j++) {
-        DataSegment segment = getSegment(j);
-        segments.put(segment.getIdentifier(), segment);
-      }
 
-      serverHolderList.add(
-          new ServerHolder(
-              new ImmutableDruidServer(
-                  new DruidServerMetadata("DruidServer_Name_" + i, "localhost", null, 10000000L, ServerType.HISTORICAL, "hot", 1),
-                  3000L,
-                  ImmutableMap.of("DUMMY", EasyMock.createMock(ImmutableDruidDataSource.class)),
-                  ImmutableMap.copyOf(segments)
-              ),
-              fromPeon
-          ));
+      List<DataSegment> segments = IntStream
+          .range(0, maxSegments)
+          .mapToObj(j -> getSegment(j))
+          .collect(Collectors.toList());
+      ImmutableDruidDataSource dataSource = new ImmutableDruidDataSource("DUMMY", Collections.emptyMap(), segments);
+
+      String serverName = "DruidServer_Name_" + i;
+      ServerHolder serverHolder = new ServerHolder(
+          new ImmutableDruidServer(
+              new DruidServerMetadata(serverName, "localhost", null, 10000000L, ServerType.HISTORICAL, "hot", 1),
+              3000L,
+              ImmutableMap.of("DUMMY", dataSource),
+              segments.size()
+          ),
+          fromPeon
+      );
+      serverHolderList.add(serverHolder);
     }
 
     // The best server to be available for next segment assignment has only 98 Segments
@@ -82,13 +89,13 @@ public class CostBalancerStrategyTest
     EasyMock.expect(druidServer.getMaxSize()).andReturn(10000000L).anyTimes();
 
     EasyMock.expect(druidServer.getSegment(EasyMock.anyObject())).andReturn(null).anyTimes();
-    Map<String, DataSegment> segments = new HashMap<>();
+    Map<SegmentId, DataSegment> segments = new HashMap<>();
     for (int j = 0; j < (maxSegments - 2); j++) {
       DataSegment segment = getSegment(j);
-      segments.put(segment.getIdentifier(), segment);
-      EasyMock.expect(druidServer.getSegment(segment.getIdentifier())).andReturn(segment).anyTimes();
+      segments.put(segment.getId(), segment);
+      EasyMock.expect(druidServer.getSegment(segment.getId())).andReturn(segment).anyTimes();
     }
-    EasyMock.expect(druidServer.getSegments()).andReturn(segments).anyTimes();
+    ImmutableDruidServerTests.expectSegments(druidServer, segments.values());
 
     EasyMock.replay(druidServer);
     serverHolderList.add(new ServerHolder(druidServer, fromPeon));
@@ -104,7 +111,7 @@ public class CostBalancerStrategyTest
    */
   public static DataSegment getSegment(int index)
   {
-    return getSegment(index, "DUMMY", day);
+    return getSegment(index, "DUMMY", DAY);
   }
 
   public static DataSegment getSegment(int index, String dataSource, Interval interval)
@@ -144,7 +151,6 @@ public class CostBalancerStrategyTest
     List<ServerHolder> serverHolderList = setupDummyCluster(10, 20);
     DataSegment segment = getSegment(1000);
 
-    final DateTime referenceTimestamp = DateTimes.of("2014-01-01");
     BalancerStrategy strategy = new CostBalancerStrategy(
         MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(1))
     );
@@ -160,7 +166,7 @@ public class CostBalancerStrategyTest
     CostBalancerStrategy strategy = new CostBalancerStrategy(
         MoreExecutors.listeningDecorator(Executors.newFixedThreadPool(4))
     );
-    double segmentCost = strategy.computeJointSegmentsCost(
+    double segmentCost = CostBalancerStrategy.computeJointSegmentsCost(
         getSegment(
             100,
             "DUMMY",

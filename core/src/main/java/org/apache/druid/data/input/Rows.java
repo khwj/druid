@@ -36,9 +36,8 @@ import java.util.stream.Collectors;
 
 /**
  */
-public class Rows
+public final class Rows
 {
-
   /**
    * @param timeStamp rollup up timestamp to be used to create group key
    * @param inputRow  input row
@@ -67,6 +66,9 @@ public class Rows
     } else if (inputValue instanceof List) {
       // guava's toString function fails on null objects, so please do not use it
       return ((List<?>) inputValue).stream().map(String::valueOf).collect(Collectors.toList());
+    } else if (inputValue instanceof byte[]) {
+      // convert byte[] to base64 encoded string
+      return Collections.singletonList(StringUtils.encodeBase64String((byte[]) inputValue));
     } else {
       return Collections.singletonList(String.valueOf(inputValue));
     }
@@ -110,7 +112,7 @@ public class Rows
         throw new ParseException(e, "Unable to parse value[%s] for field[%s]", inputValue, name);
       }
     } else {
-      throw new ParseException("Unknown type[%s] for field", inputValue.getClass(), inputValue);
+      throw new ParseException("Unknown type[%s] for field[%s]", inputValue.getClass(), name);
     }
   }
 
@@ -123,5 +125,9 @@ public class Rows
       }
     }
     return metricValueString;
+  }
+
+  private Rows()
+  {
   }
 }

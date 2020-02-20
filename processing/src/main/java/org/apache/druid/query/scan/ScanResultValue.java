@@ -21,18 +21,34 @@ package org.apache.druid.query.scan;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.druid.java.util.common.ISE;
+import org.apache.druid.java.util.common.UOE;
+import org.apache.druid.segment.DimensionHandlerUtils;
+import org.apache.druid.segment.column.ColumnHolder;
 
+import javax.annotation.Nullable;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 public class ScanResultValue implements Comparable<ScanResultValue>
 {
+  /**
+   * Segment id is stored as a String rather than {@link org.apache.druid.timeline.SegmentId}, because when a result
+   * is sent from Historical to Broker server, on the deserialization side (Broker) it's impossible to unambiguously
+   * convert a segment id string (as transmitted in the JSON format) back into a {@code SegmentId} object ({@link
+   * org.apache.druid.timeline.SegmentId#tryParse} javadoc explains that ambiguities in details). It would be fine to
+   * have the type of this field of Object, setting it to {@code SegmentId} on the Historical side and remaining as a
+   * String on the Broker side, but it's even less type-safe than always storing the segment id as a String.
+   */
   private final String segmentId;
   private final List<String> columns;
   private final Object events;
 
   @JsonCreator
   public ScanResultValue(
-      @JsonProperty("segmentId") String segmentId,
+      @JsonProperty("segmentId") @Nullable String segmentId,
       @JsonProperty("columns") List<String> columns,
       @JsonProperty("events") Object events
   )
@@ -42,6 +58,7 @@ public class ScanResultValue implements Comparable<ScanResultValue>
     this.events = events;
   }
 
+  @Nullable
   @JsonProperty
   public String getSegmentId()
   {
@@ -58,6 +75,35 @@ public class ScanResultValue implements Comparable<ScanResultValue>
   public Object getEvents()
   {
     return events;
+  }
+
+  public long getFirstEventTimestamp(ScanQuery.ResultFormat resultFormat)
+  {
+    if (resultFormat.equals(ScanQuery.ResultFormat.RESULT_FORMAT_LIST)) {
+      Object timestampObj = ((Map<String, Object>) ((List<Object>) this.getEvents()).get(0)).get(ColumnHolder.TIME_COLUMN_NAME);
+      if (timestampObj == null) {
+        throw new ISE("Unable to compare timestamp for rows without a time column");
+      }
+      return DimensionHandlerUtils.convertObjectToLong(timestampObj);
+    } else if (resultFormat.equals(ScanQuery.ResultFormat.RESULT_FORMAT_COMPACTED_LIST)) {
+      int timeColumnIndex = this.getColumns().indexOf(ColumnHolder.TIME_COLUMN_NAME);
+      if (timeColumnIndex == -1) {
+        throw new ISE("Unable to compare timestamp for rows without a time column");
+      }
+      List<Object> firstEvent = (List<Object>) ((List<Object>) this.getEvents()).get(0);
+      return DimensionHandlerUtils.convertObjectToLong(firstEvent.get(timeColumnIndex));
+    }
+    throw new UOE("Unable to get first event timestamp using result format of [%s]", resultFormat.toString());
+  }
+
+  public List<ScanResultValue> toSingleEventScanResultValues()
+  {
+    List<ScanResultValue> singleEventScanResultValues = new ArrayList<>();
+    List<Object> events = (List<Object>) this.getEvents();
+    for (Object event : events) {
+      singleEventScanResultValues.add(new ScanResultValue(segmentId, columns, Collections.singletonList(event)));
+    }
+    return singleEventScanResultValues;
   }
 
   @Override

@@ -22,13 +22,13 @@ package org.apache.druid.java.util.common.parsers;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
+import org.apache.druid.data.input.impl.DelimitedInputFormat;
 
 import javax.annotation.Nullable;
 import java.util.List;
 
 public class DelimitedParser extends AbstractFlatTextFormatParser
 {
-  private final String delimiter;
   private final Splitter splitter;
 
   public DelimitedParser(
@@ -39,15 +39,15 @@ public class DelimitedParser extends AbstractFlatTextFormatParser
   )
   {
     super(listDelimiter, hasHeaderRow, maxSkipHeaderRows);
-    this.delimiter = delimiter != null ? delimiter : FlatTextFormat.DELIMITED.getDefaultDelimiter();
+    final String finalDelimiter = delimiter != null ? delimiter : FlatTextFormat.DELIMITED.getDefaultDelimiter();
 
     Preconditions.checkState(
-        !this.delimiter.equals(getListDelimiter()),
+        !finalDelimiter.equals(getListDelimiter()),
         "Cannot have same delimiter and list delimiter of [%s]",
-        this.delimiter
+        finalDelimiter
     );
 
-    this.splitter = Splitter.on(this.delimiter);
+    this.splitter = Splitter.on(finalDelimiter);
   }
 
   public DelimitedParser(
@@ -74,6 +74,12 @@ public class DelimitedParser extends AbstractFlatTextFormatParser
   @Override
   protected List<String> parseLine(String input)
   {
-    return splitter.splitToList(input);
+    return splitToList(input);
+  }
+
+
+  private List<String> splitToList(String input)
+  {
+    return DelimitedInputFormat.splitToList(splitter, input);
   }
 }

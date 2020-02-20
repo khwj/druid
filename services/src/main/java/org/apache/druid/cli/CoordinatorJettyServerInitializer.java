@@ -20,13 +20,12 @@
 package org.apache.druid.cli;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.collect.Lists;
+import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.servlet.GuiceFilter;
 import org.apache.druid.guice.annotations.Json;
-import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.server.coordinator.DruidCoordinatorConfig;
 import org.apache.druid.server.http.OverlordProxyServlet;
 import org.apache.druid.server.http.RedirectFilter;
@@ -44,8 +43,6 @@ import org.eclipse.jetty.servlet.DefaultServlet;
 import org.eclipse.jetty.servlet.FilterHolder;
 import org.eclipse.jetty.servlet.ServletContextHandler;
 import org.eclipse.jetty.servlet.ServletHolder;
-import org.eclipse.jetty.util.resource.Resource;
-import org.eclipse.jetty.util.resource.ResourceCollection;
 
 import java.util.List;
 import java.util.Properties;
@@ -54,33 +51,22 @@ import java.util.Properties;
  */
 class CoordinatorJettyServerInitializer implements JettyServerInitializer
 {
-  private static List<String> UNSECURED_PATHS = Lists.newArrayList(
-      "/favicon.ico",
-      "/css/*",
-      "/druid.js",
-      "/druid.css",
-      "/pages/*",
-      "/fonts/*",
-      "/old-console/*",
+  private static List<String> UNSECURED_PATHS = ImmutableList.of(
       "/coordinator/false",
       "/overlord/false",
       "/status/health",
       "/druid/coordinator/v1/isLeader"
   );
 
-  private static Logger log = new Logger(CoordinatorJettyServerInitializer.class);
-
   private final DruidCoordinatorConfig config;
   private final boolean beOverlord;
-  private final AuthConfig authConfig;
   private final ServerConfig serverConfig;
 
   @Inject
-  CoordinatorJettyServerInitializer(DruidCoordinatorConfig config, Properties properties, AuthConfig authConfig, ServerConfig serverConfig)
+  CoordinatorJettyServerInitializer(DruidCoordinatorConfig config, Properties properties, ServerConfig serverConfig)
   {
     this.config = config;
     this.beOverlord = CliCoordinator.isOverlord(properties);
-    this.authConfig = authConfig;
     this.serverConfig = serverConfig;
   }
 
@@ -93,25 +79,6 @@ class CoordinatorJettyServerInitializer implements JettyServerInitializer
     ServletHolder holderPwd = new ServletHolder("default", DefaultServlet.class);
 
     root.addServlet(holderPwd, "/");
-    if (config.getConsoleStatic() == null) {
-      ResourceCollection staticResources;
-      if (beOverlord) {
-        staticResources = new ResourceCollection(
-            Resource.newClassPathResource("io/druid/console"),
-            Resource.newClassPathResource("static"),
-            Resource.newClassPathResource("indexer_static")
-        );
-      } else {
-        staticResources = new ResourceCollection(
-            Resource.newClassPathResource("io/druid/console"),
-            Resource.newClassPathResource("static")
-        );
-      }
-      root.setBaseResource(staticResources);
-    } else {
-      // used for console development
-      root.setResourceBase(config.getConsoleStatic());
-    }
 
     final AuthConfig authConfig = injector.getInstance(AuthConfig.class);
     final ObjectMapper jsonMapper = injector.getInstance(Key.get(ObjectMapper.class, Json.class));
@@ -119,12 +86,13 @@ class CoordinatorJettyServerInitializer implements JettyServerInitializer
 
     AuthenticationUtils.addSecuritySanityCheckFilter(root, jsonMapper);
 
-    // perform no-op authorization for these resources
-    AuthenticationUtils.addNoopAuthorizationFilters(root, UNSECURED_PATHS);
-    AuthenticationUtils.addNoopAuthorizationFilters(root, authConfig.getUnsecuredPaths());
+    // perform no-op authorization/authentication for these resources
+    AuthenticationUtils.addNoopAuthenticationAndAuthorizationFilters(root, UNSECURED_PATHS);
+    WebConsoleJettyServerInitializer.intializeServerForWebConsoleRoot(root);
+    AuthenticationUtils.addNoopAuthenticationAndAuthorizationFilters(root, authConfig.getUnsecuredPaths());
 
     if (beOverlord) {
-      AuthenticationUtils.addNoopAuthorizationFilters(root, CliOverlord.UNSECURED_PATHS);
+      AuthenticationUtils.addNoopAuthenticationAndAuthorizationFilters(root, CliOverlord.UNSECURED_PATHS);
     }
 
     List<Authenticator> authenticators = authenticatorMapper.getAuthenticatorChain();
@@ -167,6 +135,7 @@ class CoordinatorJettyServerInitializer implements JettyServerInitializer
     HandlerList handlerList = new HandlerList();
     handlerList.setHandlers(
         new Handler[]{
+            WebConsoleJettyServerInitializer.createWebConsoleRewriteHandler(),
             JettyServerInitUtils.getJettyRequestLogHandler(),
             JettyServerInitUtils.wrapWithDefaultGzipHandler(
                 root,

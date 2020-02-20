@@ -22,10 +22,6 @@ package org.apache.druid.indexer;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.base.Predicate;
 import com.google.common.base.Strings;
-import com.google.common.base.Throwables;
-import com.google.common.io.Files;
-import org.apache.druid.indexer.updater.HadoopDruidConverterConfig;
-import org.apache.druid.java.util.common.CompressionUtils;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.IAE;
@@ -34,10 +30,10 @@ import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.RetryUtils;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.logger.Logger;
-import org.apache.druid.segment.ProgressIndicator;
 import org.apache.druid.segment.SegmentUtils;
 import org.apache.druid.segment.loading.DataSegmentPusher;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.utils.CompressionUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -48,19 +44,25 @@ import org.apache.hadoop.io.retry.RetryPolicy;
 import org.apache.hadoop.io.retry.RetryProxy;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.MRJobConfig;
-import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.TaskAttemptID;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Progressable;
 
+import javax.annotation.Nullable;
+
 import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -79,7 +81,7 @@ public class JobHelper
   private static final int NUM_RETRIES = 8;
   private static final int SECONDS_BETWEEN_RETRIES = 2;
   private static final int DEFAULT_FS_BUFFER_SIZE = 1 << 18; // 256KB
-  private static final Pattern SNAPSHOT_JAR = Pattern.compile(".*\\-SNAPSHOT(-selfcontained)?\\.jar$");
+  private static final Pattern SNAPSHOT_JAR = Pattern.compile(".*-SNAPSHOT(-selfcontained)?\\.jar$");
 
   public static Path distributedClassPath(String path)
   {
@@ -92,7 +94,6 @@ public class JobHelper
   }
 
   public static final String INDEX_ZIP = "index.zip";
-  public static final String DESCRIPTOR_JSON = "descriptor.json";
 
   /**
    * Dose authenticate against a secured hadoop cluster
@@ -102,8 +103,8 @@ public class JobHelper
    */
   public static void authenticate(HadoopDruidIndexerConfig config)
   {
-    String principal = config.HADOOP_KERBEROS_CONFIG.getPrincipal();
-    String keytab = config.HADOOP_KERBEROS_CONFIG.getKeytab();
+    String principal = HadoopDruidIndexerConfig.HADOOP_KERBEROS_CONFIG.getPrincipal();
+    String keytab = HadoopDruidIndexerConfig.HADOOP_KERBEROS_CONFIG.getKeytab();
     if (!Strings.isNullOrEmpty(principal) && !Strings.isNullOrEmpty(keytab)) {
       Configuration conf = new Configuration();
       UserGroupInformation.setConfiguration(conf);
@@ -173,13 +174,13 @@ public class JobHelper
           );
         }
         catch (Exception e) {
-          throw Throwables.propagate(e);
+          throw new RuntimeException(e);
         }
       }
     }
   }
 
-  public static final Predicate<Throwable> shouldRetryPredicate()
+  public static Predicate<Throwable> shouldRetryPredicate()
   {
     return new Predicate<Throwable>()
     {
@@ -212,7 +213,7 @@ public class JobHelper
 
     // Non-snapshot jar files are uploaded to the shared classpath.
     final Path hdfsPath = new Path(distributedClassPath, jarFile.getName());
-    if (!fs.exists(hdfsPath)) {
+    if (shouldUploadOrReplace(jarFile, hdfsPath, fs)) {
       // Muliple jobs can try to upload the jar here,
       // to avoid them from overwriting files, first upload to intermediateClassPath and then rename to the distributedClasspath.
       final Path intermediateHdfsPath = new Path(intermediateClassPath, jarFile.getName());
@@ -259,6 +260,22 @@ public class JobHelper
     job.addFileToClassPath(hdfsPath);
   }
 
+  static boolean shouldUploadOrReplace(
+      File jarFile,
+      Path hdfsPath,
+      FileSystem fs
+  )
+      throws IOException
+  {
+    try {
+      FileStatus status = fs.getFileStatus(hdfsPath);
+      return status == null || status.getLen() != jarFile.length();
+    }
+    catch (FileNotFoundException e) {
+      return true;
+    }
+  }
+
   static void addSnapshotJarToClassPath(
       File jarFile,
       Path intermediateClassPath,
@@ -279,7 +296,7 @@ public class JobHelper
   {
     log.info("Uploading jar to path[%s]", path);
     try (OutputStream os = fs.create(path)) {
-      Files.asByteSource(jarFile).copyTo(os);
+      Files.copy(jarFile.toPath(), os);
     }
   }
 
@@ -298,11 +315,21 @@ public class JobHelper
     String mapJavaOpts = StringUtils.nullToEmptyNonDruidDataString(configuration.get(MRJobConfig.MAP_JAVA_OPTS));
     String reduceJavaOpts = StringUtils.nullToEmptyNonDruidDataString(configuration.get(MRJobConfig.REDUCE_JAVA_OPTS));
 
-    for (String propName : System.getProperties().stringPropertyNames()) {
+    for (String propName : HadoopDruidIndexerConfig.PROPERTIES.stringPropertyNames()) {
       for (String prefix : listOfAllowedPrefix) {
         if (propName.equals(prefix) || propName.startsWith(prefix + ".")) {
-          mapJavaOpts = StringUtils.format("%s -D%s=%s", mapJavaOpts, propName, System.getProperty(propName));
-          reduceJavaOpts = StringUtils.format("%s -D%s=%s", reduceJavaOpts, propName, System.getProperty(propName));
+          mapJavaOpts = StringUtils.format(
+              "%s -D%s=%s",
+              mapJavaOpts,
+              propName,
+              HadoopDruidIndexerConfig.PROPERTIES.getProperty(propName)
+          );
+          reduceJavaOpts = StringUtils.format(
+              "%s -D%s=%s",
+              reduceJavaOpts,
+              propName,
+              HadoopDruidIndexerConfig.PROPERTIES.getProperty(propName)
+          );
           break;
         }
       }
@@ -318,9 +345,9 @@ public class JobHelper
 
   public static Configuration injectSystemProperties(Configuration conf)
   {
-    for (String propName : System.getProperties().stringPropertyNames()) {
+    for (String propName : HadoopDruidIndexerConfig.PROPERTIES.stringPropertyNames()) {
       if (propName.startsWith("hadoop.")) {
-        conf.set(propName.substring("hadoop.".length()), System.getProperty(propName));
+        conf.set(propName.substring("hadoop.".length()), HadoopDruidIndexerConfig.PROPERTIES.getProperty(propName));
       }
     }
     return conf;
@@ -343,7 +370,25 @@ public class JobHelper
       config.addInputPaths(job);
     }
     catch (IOException e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
+    }
+  }
+
+  public static void writeJobIdToFile(String hadoopJobIdFileName, String hadoopJobId)
+  {
+    if (hadoopJobId != null && hadoopJobIdFileName != null) {
+      try (final OutputStream out = Files.newOutputStream(Paths.get(hadoopJobIdFileName))) {
+        HadoopDruidIndexerConfig.JSON_MAPPER.writeValue(
+            new OutputStreamWriter(out, StandardCharsets.UTF_8),
+            hadoopJobId
+        );
+        log.info("MR job id [%s] is written to the file [%s]", hadoopJobId, hadoopJobIdFileName);
+      }
+      catch (IOException e) {
+        log.warn(e, "Error writing job id [%s] to the file [%s]", hadoopJobId, hadoopJobIdFileName);
+      }
+    } else {
+      log.info("Either job id or file name is null for the submitted job. Skipping writing the file [%s]", hadoopJobIdFileName);
     }
   }
 
@@ -403,7 +448,6 @@ public class JobHelper
       final Progressable progressable,
       final File mergedBase,
       final Path finalIndexZipFilePath,
-      final Path finalDescriptorPath,
       final Path tmpPath,
       DataSegmentPusher dataSegmentPusher
   )
@@ -452,12 +496,6 @@ public class JobHelper
       );
     }
 
-    writeSegmentDescriptor(
-        outputFS,
-        finalSegment,
-        finalDescriptorPath,
-        progressable
-    );
     return finalSegment;
   }
 
@@ -523,7 +561,7 @@ public class JobHelper
       List<String> filesToCopy = Arrays.asList(baseDir.list());
       for (String fileName : filesToCopy) {
         final File fileToCopy = new File(baseDir, fileName);
-        if (java.nio.file.Files.isRegularFile(fileToCopy.toPath())) {
+        if (Files.isRegularFile(fileToCopy.toPath())) {
           size += copyFileToZipStream(fileToCopy, outputStream, progressable);
         } else {
           log.warn("File at [%s] is not a regular file! skipping as part of zip", fileToCopy.getPath());
@@ -661,7 +699,7 @@ public class JobHelper
       );
     }
     catch (Exception e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -680,7 +718,7 @@ public class JobHelper
       final Configuration configuration,
       final File outDir,
       final Progressable progressable,
-      final RetryPolicy retryPolicy
+      @Nullable final RetryPolicy retryPolicy
   ) throws IOException
   {
     final RetryPolicy effectiveRetryPolicy;
@@ -782,7 +820,7 @@ public class JobHelper
       try {
         throw new IAE(
             "Cannot figure out loadSpec %s",
-            HadoopDruidConverterConfig.jsonMapper.writeValueAsString(loadSpec)
+            HadoopDruidIndexerConfig.JSON_MAPPER.writeValueAsString(loadSpec)
         );
       }
       catch (JsonProcessingException e) {
@@ -790,64 +828,6 @@ public class JobHelper
       }
     }
     return segmentLocURI;
-  }
-
-  public static ProgressIndicator progressIndicatorForContext(
-      final TaskAttemptContext context
-  )
-  {
-    return new ProgressIndicator()
-    {
-
-      @Override
-      public void progress()
-      {
-        context.progress();
-      }
-
-      @Override
-      public void start()
-      {
-        context.progress();
-        context.setStatus("STARTED");
-      }
-
-      @Override
-      public void stop()
-      {
-        context.progress();
-        context.setStatus("STOPPED");
-      }
-
-      @Override
-      public void startSection(String section)
-      {
-        context.progress();
-        context.setStatus(StringUtils.format("STARTED [%s]", section));
-      }
-
-      @Override
-      public void stopSection(String section)
-      {
-        context.progress();
-        context.setStatus(StringUtils.format("STOPPED [%s]", section));
-      }
-    };
-  }
-
-  public static boolean deleteWithRetry(final FileSystem fs, final Path path, final boolean recursive)
-  {
-    try {
-      return RetryUtils.retry(
-          () -> fs.delete(path, recursive),
-          shouldRetryPredicate(),
-          NUM_RETRIES
-      );
-    }
-    catch (Exception e) {
-      log.error(e, "Failed to cleanup path[%s]", path);
-      throw Throwables.propagate(e);
-    }
   }
 
   public static String getJobTrackerAddress(Configuration config)

@@ -21,7 +21,6 @@ package org.apache.druid.segment.indexing.granularity;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Optional;
-import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.DateTimes;
@@ -40,7 +39,7 @@ import java.util.SortedSet;
 
 public class UniformGranularityTest
 {
-  private static final ObjectMapper jsonMapper = new DefaultObjectMapper();
+  private static final ObjectMapper JOSN_MAPPER = new DefaultObjectMapper();
 
   @Test
   public void testSimple()
@@ -131,7 +130,7 @@ public class UniformGranularityTest
     );
 
     try {
-      final GranularitySpec rtSpec = jsonMapper.readValue(jsonMapper.writeValueAsString(spec), GranularitySpec.class);
+      final GranularitySpec rtSpec = JOSN_MAPPER.readValue(JOSN_MAPPER.writeValueAsString(spec), GranularitySpec.class);
       Assert.assertEquals(
           "Round-trip bucketIntervals",
           spec.bucketIntervals(),
@@ -144,7 +143,7 @@ public class UniformGranularityTest
       );
     }
     catch (Exception e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -243,7 +242,7 @@ public class UniformGranularityTest
   public void testPeriodSegmentGranularity()
   {
     final GranularitySpec spec = new UniformGranularitySpec(
-        new PeriodGranularity(new Period("P1D"), null, DateTimes.inferTzfromString("America/Los_Angeles")),
+        new PeriodGranularity(new Period("P1D"), null, DateTimes.inferTzFromString("America/Los_Angeles")),
         null,
         Lists.newArrayList(
             Intervals.of("2012-01-08T00-08:00/2012-01-11T00-08:00"),
@@ -263,7 +262,7 @@ public class UniformGranularityTest
       actualIntervals.add(interval.toDurationMillis());
     }
 
-    final ISOChronology chrono = ISOChronology.getInstance(DateTimes.inferTzfromString("America/Los_Angeles"));
+    final ISOChronology chrono = ISOChronology.getInstance(DateTimes.inferTzFromString("America/Los_Angeles"));
 
     final ArrayList<Long> expectedIntervals = Lists.newArrayList(
         new Interval("2012-01-01/2012-01-02", chrono).toDurationMillis(),

@@ -36,22 +36,18 @@ import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.filter.BitmapIndexSelector;
 import org.apache.druid.query.filter.BooleanFilter;
 import org.apache.druid.query.filter.DimFilter;
-import org.apache.druid.query.filter.DruidLongPredicate;
 import org.apache.druid.query.filter.DruidPredicateFactory;
 import org.apache.druid.query.filter.Filter;
+import org.apache.druid.query.filter.FilterTuning;
 import org.apache.druid.query.filter.ValueMatcher;
 import org.apache.druid.query.filter.ValueMatcherColumnSelectorStrategy;
 import org.apache.druid.query.filter.ValueMatcherColumnSelectorStrategyFactory;
-import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
-import org.apache.druid.segment.BaseLongColumnValueSelector;
 import org.apache.druid.segment.ColumnSelector;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.DimensionHandlerUtils;
 import org.apache.druid.segment.IntIteratorUtils;
 import org.apache.druid.segment.column.BitmapIndex;
-import org.apache.druid.segment.column.ColumnCapabilities;
 import org.apache.druid.segment.column.ColumnHolder;
-import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.segment.data.CloseableIndexed;
 import org.apache.druid.segment.data.Indexed;
 
@@ -155,16 +151,6 @@ public class Filters
       final DruidPredicateFactory predicateFactory
   )
   {
-    final ColumnCapabilities capabilities = columnSelectorFactory.getColumnCapabilities(columnName);
-
-    // This should be folded into the ValueMatcherColumnSelectorStrategy once that can handle LONG typed columns.
-    if (capabilities != null && capabilities.getType() == ValueType.LONG) {
-      return getLongPredicateMatcher(
-          columnSelectorFactory.makeColumnValueSelector(columnName),
-          predicateFactory.makeLongPredicate()
-      );
-    }
-
     final ColumnSelectorPlus<ValueMatcherColumnSelectorStrategy> selector =
         DimensionHandlerUtils.createColumnSelectorPlus(
             ValueMatcherColumnSelectorStrategyFactory.instance(),
@@ -453,28 +439,6 @@ public class Filters
     return false;
   }
 
-  public static ValueMatcher getLongPredicateMatcher(
-      final BaseLongColumnValueSelector longSelector,
-      final DruidLongPredicate predicate
-  )
-  {
-    return new ValueMatcher()
-    {
-      @Override
-      public boolean matches()
-      {
-        return predicate.applyLong(longSelector.getLong());
-      }
-
-      @Override
-      public void inspectRuntimeShape(RuntimeShapeInspector inspector)
-      {
-        inspector.visit("longSelector", longSelector);
-        inspector.visit("predicate", predicate);
-      }
-    };
-  }
-
   @Nullable
   public static Filter convertToCNFFromQueryContext(Query query, @Nullable Filter filter)
   {
@@ -563,9 +527,7 @@ public class Filters
           andList.add(child);
         } else if (child instanceof OrFilter) {
           // pull apart the kids of the OR expression
-          for (Filter grandChild : ((OrFilter) child).getFilters()) {
-            nonAndList.add(grandChild);
-          }
+          nonAndList.addAll(((OrFilter) child).getFilters());
         } else {
           nonAndList.add(child);
         }
@@ -584,8 +546,7 @@ public class Filters
   private static Filter flatten(Filter root)
   {
     if (root instanceof BooleanFilter) {
-      List<Filter> children = new ArrayList<>();
-      children.addAll(((BooleanFilter) root).getFilters());
+      List<Filter> children = new ArrayList<>(((BooleanFilter) root).getFilters());
       // iterate through the index, so that if we add more children,
       // they don't get re-visited
       for (int i = 0; i < children.size(); ++i) {
@@ -650,5 +611,56 @@ public class Filters
     if (andList.size() > 1) {
       generateAllCombinations(result, andList.subList(1, andList.size()), nonAndList);
     }
+  }
+
+  /**
+   * This method provides a "standard" implementation of {@link Filter#shouldUseBitmapIndex(BitmapIndexSelector)} which takes
+   * a {@link Filter}, a {@link BitmapIndexSelector}, and {@link FilterTuning} to determine if:
+   *  a) the filter supports bitmap indexes for all required columns
+   *  b) the filter tuning specifies that it should use the index
+   *  c) the cardinality of the column is above the minimum threshold and below the maximum threshold to use the index
+   *
+   * If all these things are true, {@link org.apache.druid.segment.QueryableIndexStorageAdapter} will utilize the
+   * indexes.
+   */
+  public static boolean shouldUseBitmapIndex(
+      Filter filter,
+      BitmapIndexSelector indexSelector,
+      @Nullable FilterTuning filterTuning
+  )
+  {
+    final FilterTuning tuning = filterTuning != null ? filterTuning : FilterTuning.createDefault(filter, indexSelector);
+    if (filter.supportsBitmapIndex(indexSelector) && tuning.getUseBitmapIndex()) {
+      return filter.getRequiredColumns().stream().allMatch(column -> {
+        final BitmapIndex index = indexSelector.getBitmapIndex(column);
+        Preconditions.checkNotNull(index, "Column does not have a bitmap index");
+        final int cardinality = index.getCardinality();
+        return cardinality >= tuning.getMinCardinalityToUseBitmapIndex()
+               && cardinality <= tuning.getMaxCardinalityToUseBitmapIndex();
+      });
+    }
+    return false;
+  }
+
+  /**
+   * Create a filter representing an AND relationship across a list of filters.
+   *
+   * @param filterList List of filters
+   * @return If filterList has more than one element, return an AND filter composed of the filters from filterList
+   *         If filterList has a single element, return that element alone
+   *         If filterList is empty, return null
+   */
+  @Nullable
+  public static Filter and(List<Filter> filterList)
+  {
+    if (filterList.isEmpty()) {
+      return null;
+    }
+
+    if (filterList.size() == 1) {
+      return filterList.get(0);
+    }
+
+    return new AndFilter(filterList);
   }
 }

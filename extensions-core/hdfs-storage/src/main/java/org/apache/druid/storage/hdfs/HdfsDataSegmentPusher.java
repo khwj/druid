@@ -24,17 +24,16 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.io.ByteSink;
-import com.google.common.io.ByteSource;
 import com.google.inject.Inject;
 import org.apache.druid.common.utils.UUIDUtils;
-import org.apache.druid.java.util.common.CompressionUtils;
+import org.apache.druid.guice.Hdfs;
 import org.apache.druid.java.util.common.IOE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.segment.SegmentUtils;
 import org.apache.druid.segment.loading.DataSegmentPusher;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.utils.CompressionUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -44,11 +43,11 @@ import org.joda.time.format.ISODateTimeFormat;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.net.URI;
 import java.util.Map;
 
 /**
+ *
  */
 public class HdfsDataSegmentPusher implements DataSegmentPusher
 {
@@ -58,11 +57,15 @@ public class HdfsDataSegmentPusher implements DataSegmentPusher
   private final ObjectMapper jsonMapper;
 
   // We lazily initialize fullQualifiedStorageDirectory to avoid potential issues with Hadoop namenode HA.
-  // Please see https://github.com/apache/incubator-druid/pull/5684
+  // Please see https://github.com/apache/druid/pull/5684
   private final Supplier<String> fullyQualifiedStorageDirectory;
 
   @Inject
-  public HdfsDataSegmentPusher(HdfsDataSegmentPusherConfig config, Configuration hadoopConfig, ObjectMapper jsonMapper)
+  public HdfsDataSegmentPusher(
+      HdfsDataSegmentPusherConfig config,
+      @Hdfs Configuration hadoopConfig,
+      ObjectMapper jsonMapper
+  )
   {
     this.hadoopConfig = hadoopConfig;
     this.jsonMapper = jsonMapper;
@@ -80,8 +83,6 @@ public class HdfsDataSegmentPusher implements DataSegmentPusher
           }
         }
     );
-
-    log.info("Configured HDFS as deep storage");
   }
 
   @Deprecated
@@ -104,9 +105,9 @@ public class HdfsDataSegmentPusher implements DataSegmentPusher
     // '{partitionNum}_index.zip' without unique paths and '{partitionNum}_{UUID}_index.zip' with unique paths.
     final String storageDir = this.getStorageDir(segment, false);
 
-    log.info(
+    log.debug(
         "Copying segment[%s] to HDFS at location[%s/%s]",
-        segment.getIdentifier(),
+        segment.getId(),
         fullyQualifiedStorageDirectory.get(),
         storageDir
     );
@@ -121,7 +122,7 @@ public class HdfsDataSegmentPusher implements DataSegmentPusher
     FileSystem fs = tmpIndexFile.getFileSystem(hadoopConfig);
 
     fs.mkdirs(tmpIndexFile.getParent());
-    log.info("Compressing files from[%s] to [%s]", inDir, tmpIndexFile);
+    log.debug("Compressing files from[%s] to [%s]", inDir, tmpIndexFile);
 
     final long size;
     final DataSegment dataSegment;
@@ -138,31 +139,13 @@ public class HdfsDataSegmentPusher implements DataSegmentPusher
           segment.getShardSpec().getPartitionNum(),
           uniquePrefix
       ));
-      final Path outDescriptorFile = new Path(StringUtils.format(
-          "%s/%s/%d_%sdescriptor.json",
-          fullyQualifiedStorageDirectory.get(),
-          storageDir,
-          segment.getShardSpec().getPartitionNum(),
-          uniquePrefix
-      ));
 
       dataSegment = segment.withLoadSpec(makeLoadSpec(outIndexFile.toUri()))
                            .withSize(size)
                            .withBinaryVersion(SegmentUtils.getVersionFromDir(inDir));
 
-      final Path tmpDescriptorFile = new Path(
-          tmpIndexFile.getParent(),
-          StringUtils.format("%s_descriptor.json", dataSegment.getShardSpec().getPartitionNum())
-      );
-
-      log.info("Creating descriptor file at[%s]", tmpDescriptorFile);
-      ByteSource
-          .wrap(jsonMapper.writeValueAsBytes(dataSegment))
-          .copyTo(new HdfsOutputStreamSupplier(fs, tmpDescriptorFile));
-
       // Create parent if it does not exist, recreation is not an error
       fs.mkdirs(outIndexFile.getParent());
-      copyFilesWithChecks(fs, tmpDescriptorFile, outDescriptorFile);
       copyFilesWithChecks(fs, tmpIndexFile, outIndexFile);
     }
     finally {
@@ -191,24 +174,6 @@ public class HdfsDataSegmentPusher implements DataSegmentPusher
       } else {
         throw new IOE("Failed to rename temp file [%s] and final segment path [%s] is not present.", from, to);
       }
-    }
-  }
-
-  private static class HdfsOutputStreamSupplier extends ByteSink
-  {
-    private final FileSystem fs;
-    private final Path descriptorFile;
-
-    public HdfsOutputStreamSupplier(FileSystem fs, Path descriptorFile)
-    {
-      this.fs = fs;
-      this.descriptorFile = descriptorFile;
-    }
-
-    @Override
-    public OutputStream openStream() throws IOException
-    {
-      return fs.create(descriptorFile);
     }
   }
 

@@ -23,29 +23,45 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 
+import javax.annotation.Nullable;
+
 import java.util.List;
 
 /**
- * Return type of SegmentChangeRequestHistory.getRequestsSince(counter).
+ * Return type of {@link ChangeRequestHistory#getRequestsSince}.
  */
-public class ChangeRequestsSnapshot<T>
+public final class ChangeRequestsSnapshot<T>
 {
-  //if true, that means caller should reset the counter and request again.
+
+  public static <T> ChangeRequestsSnapshot<T> success(ChangeRequestHistory.Counter counter, List<T> requests)
+  {
+    return new ChangeRequestsSnapshot<>(false, null, counter, requests);
+  }
+
+  public static <T> ChangeRequestsSnapshot<T> fail(String resetCause)
+  {
+    return new ChangeRequestsSnapshot<>(true, resetCause, null, null);
+  }
+
+  /** if true, that means caller should reset the counter and request again. */
   private final boolean resetCounter;
 
-  //cause for reset if resetCounter is true
+  /** cause for reset if {@link #resetCounter} is true */
+  @Nullable
   private final String resetCause;
 
-  //segments requests delta since counter, if resetCounter if false
+  /** segments requests delta since counter, if {@link #resetCounter} if false */
+  @Nullable
   private final ChangeRequestHistory.Counter counter;
+  @Nullable
   private final List<T> requests;
 
   @JsonCreator
   public ChangeRequestsSnapshot(
       @JsonProperty("resetCounter") boolean resetCounter,
-      @JsonProperty("resetCause") String resetCause,
-      @JsonProperty("counter") ChangeRequestHistory.Counter counter,
-      @JsonProperty("requests") List<T> requests
+      @JsonProperty("resetCause") @Nullable String resetCause,
+      @JsonProperty("counter") @Nullable ChangeRequestHistory.Counter counter,
+      @JsonProperty("requests") @Nullable List<T> requests
   )
   {
     this.resetCounter = resetCounter;
@@ -59,35 +75,27 @@ public class ChangeRequestsSnapshot<T>
     this.requests = requests;
   }
 
-  public static <T> ChangeRequestsSnapshot<T> success(ChangeRequestHistory.Counter counter,
-                                               List<T> requests)
-  {
-    return new ChangeRequestsSnapshot(false, null, counter, requests);
-  }
-
-  public static <T> ChangeRequestsSnapshot<T> fail(String resetCause)
-  {
-    return new ChangeRequestsSnapshot(true, resetCause, null, null);
-  }
-
   @JsonProperty
   public boolean isResetCounter()
   {
     return resetCounter;
   }
 
+  @Nullable
   @JsonProperty
   public String getResetCause()
   {
     return resetCause;
   }
 
+  @Nullable
   @JsonProperty
   public ChangeRequestHistory.Counter getCounter()
   {
     return counter;
   }
 
+  @Nullable
   @JsonProperty
   public List<T> getRequests()
   {

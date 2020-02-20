@@ -25,6 +25,7 @@ import org.apache.druid.segment.QueryableIndex;
 import org.apache.druid.segment.Segment;
 import org.apache.druid.segment.StorageAdapter;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.joda.time.Interval;
 
 import java.io.File;
@@ -36,7 +37,6 @@ import java.util.Set;
 */
 public class CacheTestSegmentLoader implements SegmentLoader
 {
-
   private final Set<DataSegment> segmentsInTrash = new HashSet<>();
 
   @Override
@@ -47,14 +47,14 @@ public class CacheTestSegmentLoader implements SegmentLoader
   }
 
   @Override
-  public Segment getSegment(final DataSegment segment)
+  public Segment getSegment(final DataSegment segment, boolean lazy)
   {
     return new AbstractSegment()
     {
       @Override
-      public String getIdentifier()
+      public SegmentId getId()
       {
-        return segment.getIdentifier();
+        return segment.getId();
       }
 
       @Override

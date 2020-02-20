@@ -19,11 +19,9 @@
 
 package org.apache.druid.query;
 
-import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.Closeables;
-import com.google.common.util.concurrent.MoreExecutors;
 import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.impl.DimensionsSpec;
@@ -32,6 +30,7 @@ import org.apache.druid.data.input.impl.TimeAndDimsParseSpec;
 import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.ISE;
+import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.guava.FunctionalIterable;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
@@ -49,6 +48,7 @@ import org.apache.druid.segment.QueryableIndex;
 import org.apache.druid.segment.QueryableIndexSegment;
 import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
+import org.apache.druid.timeline.SegmentId;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -106,23 +106,16 @@ public class SchemaEvolutionTest
     final Sequence<T> results = new FinalizeResultsQueryRunner<>(
         factory.getToolchest().mergeResults(
             factory.mergeRunners(
-                MoreExecutors.sameThreadExecutor(),
+                Execs.directExecutor(),
                 FunctionalIterable
                     .create(indexes)
                     .transform(
-                        new Function<QueryableIndex, QueryRunner<T>>()
-                        {
-                          @Override
-                          public QueryRunner<T> apply(final QueryableIndex index)
-                          {
-                            return factory.createRunner(new QueryableIndexSegment("xxx", index));
-                          }
-                        }
+                        index -> factory.createRunner(new QueryableIndexSegment(index, SegmentId.dummy("xxx")))
                     )
             )
         ),
         (QueryToolChest<T, Query<T>>) factory.getToolchest()
-    ).run(QueryPlus.wrap(query), new HashMap<>());
+    ).run(QueryPlus.wrap(query));
     return results.toList();
   }
 
@@ -268,7 +261,7 @@ public class SchemaEvolutionTest
     // Only string(1)
     // Note: Expressions implicitly cast strings to numbers, leading to the a/b vs c/d difference.
     Assert.assertEquals(
-        timeseriesResult(ImmutableMap.of("a", 0L, "b", 0.0, "c", 31L, "d", THIRTY_ONE_POINT_ONE)),
+        timeseriesResult(ImmutableMap.of("a", 31L, "b", THIRTY_ONE_POINT_ONE, "c", 31L, "d", THIRTY_ONE_POINT_ONE)),
         runQuery(query, factory, ImmutableList.of(index1))
     );
 
@@ -299,8 +292,8 @@ public class SchemaEvolutionTest
     // Note: Expressions implicitly cast strings to numbers, leading to the a/b vs c/d difference.
     Assert.assertEquals(
         timeseriesResult(ImmutableMap.of(
-            "a", 31L * 2,
-            "b", THIRTY_ONE_POINT_ONE + 31,
+            "a", 31L * 3,
+            "b", THIRTY_ONE_POINT_ONE * 2 + 31,
             "c", 31L * 3,
             "d", THIRTY_ONE_POINT_ONE * 2 + 31
         )),
@@ -342,7 +335,7 @@ public class SchemaEvolutionTest
 
     // Only string(1) -- which we can filter but not aggregate
     Assert.assertEquals(
-        timeseriesResult(ImmutableMap.of("a", 0L, "b", 0.0, "c", 2L)),
+        timeseriesResult(ImmutableMap.of("a", 19L, "b", 19.1, "c", 2L)),
         runQuery(query, factory, ImmutableList.of(index1))
     );
 
@@ -374,8 +367,8 @@ public class SchemaEvolutionTest
     // string(1) + long(2) + float(3) + nonexistent(4)
     Assert.assertEquals(
         timeseriesResult(ImmutableMap.of(
-            "a", 38L,
-            "b", 38.1,
+            "a", 57L,
+            "b", 57.2,
             "c", 6L
         )),
         runQuery(query, factory, ImmutableList.of(index1, index2, index3, index4))

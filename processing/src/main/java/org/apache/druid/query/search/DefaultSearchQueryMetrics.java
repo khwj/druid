@@ -26,7 +26,6 @@ import org.apache.druid.query.BitmapResultFactory;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryMetrics;
 import org.apache.druid.query.filter.Filter;
-import org.joda.time.Interval;
 
 import java.util.List;
 
@@ -89,6 +88,12 @@ public class DefaultSearchQueryMetrics implements SearchQueryMetrics
   }
 
   @Override
+  public void sqlQueryId(SearchQuery query)
+  {
+    throw new ISE("Unsupported method in default query metrics implementation.");
+  }
+
+  @Override
   public void granularity(SearchQuery query)
   {
     // Don't emit by default
@@ -131,12 +136,6 @@ public class DefaultSearchQueryMetrics implements SearchQueryMetrics
   }
 
   @Override
-  public void chunkInterval(Interval interval)
-  {
-    delegateQueryMetrics.chunkInterval(interval);
-  }
-
-  @Override
   public void preFilters(List<Filter> preFilters)
   {
     delegateQueryMetrics.preFilters(preFilters);
@@ -152,6 +151,18 @@ public class DefaultSearchQueryMetrics implements SearchQueryMetrics
   public void identity(String identity)
   {
     delegateQueryMetrics.identity(identity);
+  }
+
+  @Override
+  public void vectorized(final boolean vectorized)
+  {
+    delegateQueryMetrics.vectorized(vectorized);
+  }
+
+  @Override
+  public void parallelMergeParallelism(int parallelism)
+  {
+    delegateQueryMetrics.parallelMergeParallelism(parallelism);
   }
 
   @Override
@@ -188,12 +199,6 @@ public class DefaultSearchQueryMetrics implements SearchQueryMetrics
   public QueryMetrics reportSegmentAndCacheTime(long timeNs)
   {
     return delegateQueryMetrics.reportSegmentAndCacheTime(timeNs);
-  }
-
-  @Override
-  public QueryMetrics reportIntervalChunkTime(long timeNs)
-  {
-    return delegateQueryMetrics.reportIntervalChunkTime(timeNs);
   }
 
   @Override
@@ -242,6 +247,42 @@ public class DefaultSearchQueryMetrics implements SearchQueryMetrics
   public QueryMetrics reportPreFilteredRows(long numRows)
   {
     return delegateQueryMetrics.reportPreFilteredRows(numRows);
+  }
+
+  @Override
+  public QueryMetrics reportParallelMergeParallelism(int parallelism)
+  {
+    return delegateQueryMetrics.reportParallelMergeParallelism(parallelism);
+  }
+
+  @Override
+  public QueryMetrics reportParallelMergeInputSequences(long numSequences)
+  {
+    return delegateQueryMetrics.reportParallelMergeInputSequences(numSequences);
+  }
+
+  @Override
+  public QueryMetrics reportParallelMergeInputRows(long numRows)
+  {
+    return delegateQueryMetrics.reportParallelMergeInputRows(numRows);
+  }
+
+  @Override
+  public QueryMetrics reportParallelMergeOutputRows(long numRows)
+  {
+    return delegateQueryMetrics.reportParallelMergeOutputRows(numRows);
+  }
+
+  @Override
+  public QueryMetrics reportParallelMergeTaskCount(long numTasks)
+  {
+    return delegateQueryMetrics.reportParallelMergeTaskCount(numTasks);
+  }
+
+  @Override
+  public QueryMetrics reportParallelMergeTotalCpuTime(long timeNs)
+  {
+    return delegateQueryMetrics.reportParallelMergeTotalCpuTime(timeNs);
   }
 
   @Override

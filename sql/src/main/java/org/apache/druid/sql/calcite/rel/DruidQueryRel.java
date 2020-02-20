@@ -21,7 +21,6 @@ package org.apache.druid.sql.calcite.rel;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.base.Preconditions;
-import org.apache.calcite.interpreter.BindableConvention;
 import org.apache.calcite.plan.Convention;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptCost;
@@ -36,10 +35,10 @@ import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.sql.calcite.table.DruidTable;
 
 import javax.annotation.Nonnull;
-import java.util.List;
+import java.util.Set;
 
 /**
- * DruidRel that uses a "table" dataSource.
+ * DruidRel that operates on top of a {@link DruidTable} directly (no joining or subqueries).
  */
 public class DruidQueryRel extends DruidRel<DruidQueryRel>
 {
@@ -111,19 +110,6 @@ public class DruidQueryRel extends DruidRel<DruidQueryRel>
   }
 
   @Override
-  public DruidQueryRel asBindable()
-  {
-    return new DruidQueryRel(
-        getCluster(),
-        getTraitSet().plus(BindableConvention.INSTANCE),
-        table,
-        druidTable,
-        getQueryMaker(),
-        partialQuery
-    );
-  }
-
-  @Override
   public DruidQueryRel asDruidConvention()
   {
     return new DruidQueryRel(
@@ -137,9 +123,9 @@ public class DruidQueryRel extends DruidRel<DruidQueryRel>
   }
 
   @Override
-  public List<String> getDatasourceNames()
+  public Set<String> getDataSourceNames()
   {
-    return druidTable.getDataSource().getNames();
+    return druidTable.getDataSource().getTableNames();
   }
 
   @Override

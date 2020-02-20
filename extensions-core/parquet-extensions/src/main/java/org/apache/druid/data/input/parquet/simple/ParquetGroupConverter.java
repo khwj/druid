@@ -62,6 +62,10 @@ class ParquetGroupConverter
 
     final int fieldIndex = g.getType().getFieldIndex(fieldName);
 
+    if (g.getFieldRepetitionCount(fieldIndex) <= 0) {
+      return null;
+    }
+
     Type fieldType = g.getType().getFields().get(fieldIndex);
 
     // primitive field
@@ -269,7 +273,7 @@ class ParquetGroupConverter
         // convert logical types
         switch (ot) {
           case DATE:
-            long ts = g.getInteger(fieldIndex, 0) * MILLIS_IN_DAY;
+            long ts = g.getInteger(fieldIndex, index) * MILLIS_IN_DAY;
             return ts;
           case TIME_MICROS:
             return g.getLong(fieldIndex, index);
@@ -393,7 +397,7 @@ class ParquetGroupConverter
               return bytes;
             }
           default:
-            throw new RE("Unknown primitive conversion: %s", ot.name());
+            throw new RE("Unknown primitive conversion: %s", pt.getPrimitiveTypeName());
         }
       }
     }
@@ -463,7 +467,7 @@ class ParquetGroupConverter
     return false;
   }
 
-  private boolean binaryAsString;
+  private final boolean binaryAsString;
 
   ParquetGroupConverter(boolean binaryAsString)
   {

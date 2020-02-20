@@ -20,6 +20,7 @@
 package org.apache.druid.indexing.overlord;
 
 import org.apache.druid.indexing.worker.Worker;
+import org.apache.druid.indexing.worker.config.WorkerConfig;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -31,12 +32,12 @@ public class TaskRunnerUtilsTest
   public void testMakeWorkerURL()
   {
     final URL url = TaskRunnerUtils.makeWorkerURL(
-        new Worker("https", "1.2.3.4:8290", "1.2.3.4", 1, "0"),
+        new Worker("https", "1.2.3.4:8290", "1.2.3.4", 1, "0", WorkerConfig.DEFAULT_CATEGORY),
         "/druid/worker/v1/task/%s/log",
         "foo bar&"
     );
-    Assert.assertEquals("https://1.2.3.4:8290/druid/worker/v1/task/foo+bar%26/log", url.toString());
+    Assert.assertEquals("https://1.2.3.4:8290/druid/worker/v1/task/foo%20bar%26/log", url.toString());
     Assert.assertEquals("1.2.3.4:8290", url.getAuthority());
-    Assert.assertEquals("/druid/worker/v1/task/foo+bar%26/log", url.getPath());
+    Assert.assertEquals("/druid/worker/v1/task/foo%20bar%26/log", url.getPath());
   }
 }

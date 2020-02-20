@@ -28,34 +28,47 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.BiMap;
 import com.google.common.collect.HashBiMap;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
+import org.apache.curator.shaded.com.google.common.base.Verify;
+import org.apache.druid.client.coordinator.CoordinatorClient;
+import org.apache.druid.client.indexing.ClientCompactionTaskQuery;
+import org.apache.druid.client.indexing.IndexingServiceClient;
 import org.apache.druid.data.input.impl.DimensionSchema;
 import org.apache.druid.data.input.impl.DimensionSchema.MultiValueHandling;
 import org.apache.druid.data.input.impl.DimensionsSpec;
 import org.apache.druid.data.input.impl.DoubleDimensionSchema;
 import org.apache.druid.data.input.impl.FloatDimensionSchema;
-import org.apache.druid.data.input.impl.InputRowParser;
 import org.apache.druid.data.input.impl.LongDimensionSchema;
-import org.apache.druid.data.input.impl.NoopInputRowParser;
 import org.apache.druid.data.input.impl.StringDimensionSchema;
-import org.apache.druid.data.input.impl.TimeAndDimsParseSpec;
+import org.apache.druid.data.input.impl.TimestampSpec;
+import org.apache.druid.indexer.Checks;
+import org.apache.druid.indexer.Property;
 import org.apache.druid.indexer.TaskStatus;
+import org.apache.druid.indexer.partitions.DynamicPartitionsSpec;
+import org.apache.druid.indexer.partitions.PartitionsSpec;
+import org.apache.druid.indexing.common.RetryPolicyFactory;
+import org.apache.druid.indexing.common.SegmentLoaderFactory;
 import org.apache.druid.indexing.common.TaskToolbox;
-import org.apache.druid.indexing.common.actions.SegmentListUsedAction;
+import org.apache.druid.indexing.common.actions.RetrieveUsedSegmentsAction;
 import org.apache.druid.indexing.common.actions.TaskActionClient;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
-import org.apache.druid.indexing.common.task.IndexTask.IndexIOConfig;
-import org.apache.druid.indexing.common.task.IndexTask.IndexIngestionSpec;
 import org.apache.druid.indexing.common.task.IndexTask.IndexTuningConfig;
-import org.apache.druid.indexing.firehose.IngestSegmentFirehoseFactory;
-import org.apache.druid.java.util.common.IAE;
+import org.apache.druid.indexing.common.task.batch.parallel.ParallelIndexIOConfig;
+import org.apache.druid.indexing.common.task.batch.parallel.ParallelIndexIngestionSpec;
+import org.apache.druid.indexing.common.task.batch.parallel.ParallelIndexSupervisorTask;
+import org.apache.druid.indexing.common.task.batch.parallel.ParallelIndexTuningConfig;
+import org.apache.druid.indexing.input.DruidInputSource;
+import org.apache.druid.indexing.overlord.Segments;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.JodaUtils;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.java.util.common.RE;
+import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.granularity.Granularities;
+import org.apache.druid.java.util.common.granularity.Granularity;
+import org.apache.druid.java.util.common.granularity.GranularityType;
 import org.apache.druid.java.util.common.guava.Comparators;
-import org.apache.druid.java.util.common.jackson.JacksonUtils;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.segment.DimensionHandler;
@@ -64,14 +77,15 @@ import org.apache.druid.segment.QueryableIndex;
 import org.apache.druid.segment.column.ColumnHolder;
 import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.segment.indexing.DataSchema;
-import org.apache.druid.segment.indexing.granularity.ArbitraryGranularitySpec;
+import org.apache.druid.segment.indexing.TuningConfig;
 import org.apache.druid.segment.indexing.granularity.GranularitySpec;
+import org.apache.druid.segment.indexing.granularity.UniformGranularitySpec;
 import org.apache.druid.segment.loading.SegmentLoadingException;
+import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
 import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
-import org.apache.druid.server.coordinator.DataSourceCompactionConfig;
+import org.apache.druid.server.coordinator.duty.CompactSegments;
 import org.apache.druid.server.security.AuthorizerMapper;
 import org.apache.druid.timeline.DataSegment;
-import org.apache.druid.timeline.TimelineLookup;
 import org.apache.druid.timeline.TimelineObjectHolder;
 import org.apache.druid.timeline.VersionedIntervalTimeline;
 import org.apache.druid.timeline.partition.PartitionChunk;
@@ -89,26 +103,46 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.SortedSet;
-import java.util.TreeSet;
+import java.util.TreeMap;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
-import java.util.stream.StreamSupport;
 
-public class CompactionTask extends AbstractTask
+/**
+ * The client representation of this task is {@link ClientCompactionTaskQuery}. JSON
+ * serialization fields of this class must correspond to those of {@link
+ * ClientCompactionTaskQuery}.
+ */
+public class CompactionTask extends AbstractBatchIndexTask
 {
   private static final Logger log = new Logger(CompactionTask.class);
-  private static final String TYPE = "compact";
-  private static final boolean DEFAULT_KEEP_SEGMENT_GRANULARITY = true;
 
-  private final Interval interval;
-  private final List<DataSegment> segments;
+  /**
+   * The CompactionTask creates and runs multiple IndexTask instances. When the {@link AppenderatorsManager}
+   * is asked to clean up, it does so on a per-task basis keyed by task ID. However, the subtask IDs of the
+   * CompactionTask are not externally visible. This context flag is used to ensure that all the appenderators
+   * created for the CompactionTasks's subtasks are tracked under the ID of the parent CompactionTask.
+   * The CompactionTask may change in the future and no longer require this behavior (e.g., reusing the same
+   * Appenderator across subtasks, or allowing the subtasks to use the same ID). The CompactionTask is also the only
+   * task type that currently creates multiple appenderators. Thus, a context flag is used to handle this case
+   * instead of a more general approach such as new methods on the Task interface.
+   */
+  public static final String CTX_KEY_APPENDERATOR_TRACKING_TASK_ID = "appenderatorTrackingTaskId";
+
+  private static final String TYPE = "compact";
+
+  static {
+    Verify.verify(TYPE.equals(CompactSegments.COMPACTION_TASK_TYPE));
+  }
+
+  private final CompactionIOConfig ioConfig;
+  @Nullable
   private final DimensionsSpec dimensionsSpec;
-  private final boolean keepSegmentGranularity;
   @Nullable
-  private final Long targetCompactionSizeBytes;
+  private final AggregatorFactory[] metricsSpec;
   @Nullable
-  private final IndexTuningConfig tuningConfig;
+  private final Granularity segmentGranularity;
+  @Nullable
+  private final ParallelIndexTuningConfig tuningConfig;
   private final ObjectMapper jsonMapper;
   @JsonIgnore
   private final SegmentProvider segmentProvider;
@@ -125,84 +159,171 @@ public class CompactionTask extends AbstractTask
   private final RowIngestionMetersFactory rowIngestionMetersFactory;
 
   @JsonIgnore
-  private List<IndexTask> indexTaskSpecs;
+  private final CoordinatorClient coordinatorClient;
+
+  private final IndexingServiceClient indexingServiceClient;
+
+  @JsonIgnore
+  private final SegmentLoaderFactory segmentLoaderFactory;
+
+  @JsonIgnore
+  private final RetryPolicyFactory retryPolicyFactory;
+
+  @JsonIgnore
+  private final AppenderatorsManager appenderatorsManager;
+
+  @JsonIgnore
+  private final CurrentSubTaskHolder currentSubTaskHolder = new CurrentSubTaskHolder(
+      (taskObject, config) -> {
+        final ParallelIndexSupervisorTask indexTask = (ParallelIndexSupervisorTask) taskObject;
+        indexTask.stopGracefully(config);
+      }
+  );
 
   @JsonCreator
   public CompactionTask(
       @JsonProperty("id") final String id,
       @JsonProperty("resource") final TaskResource taskResource,
       @JsonProperty("dataSource") final String dataSource,
-      @Nullable @JsonProperty("interval") final Interval interval,
-      @Nullable @JsonProperty("segments") final List<DataSegment> segments,
-      @Nullable @JsonProperty("dimensions") final DimensionsSpec dimensionsSpec,
-      @Nullable @JsonProperty("keepSegmentGranularity") final Boolean keepSegmentGranularity,
-      @Nullable @JsonProperty("targetCompactionSizeBytes") final Long targetCompactionSizeBytes,
-      @Nullable @JsonProperty("tuningConfig") final IndexTuningConfig tuningConfig,
-      @Nullable @JsonProperty("context") final Map<String, Object> context,
+      @JsonProperty("interval") @Deprecated @Nullable final Interval interval,
+      @JsonProperty("segments") @Deprecated @Nullable final List<DataSegment> segments,
+      @JsonProperty("ioConfig") @Nullable CompactionIOConfig ioConfig,
+      @JsonProperty("dimensions") @Nullable final DimensionsSpec dimensions,
+      @JsonProperty("dimensionsSpec") @Nullable final DimensionsSpec dimensionsSpec,
+      @JsonProperty("metricsSpec") @Nullable final AggregatorFactory[] metricsSpec,
+      @JsonProperty("segmentGranularity") @Nullable final Granularity segmentGranularity,
+      @JsonProperty("tuningConfig") @Nullable final TuningConfig tuningConfig,
+      @JsonProperty("context") @Nullable final Map<String, Object> context,
       @JacksonInject ObjectMapper jsonMapper,
       @JacksonInject AuthorizerMapper authorizerMapper,
       @JacksonInject ChatHandlerProvider chatHandlerProvider,
-      @JacksonInject RowIngestionMetersFactory rowIngestionMetersFactory
+      @JacksonInject RowIngestionMetersFactory rowIngestionMetersFactory,
+      @JacksonInject CoordinatorClient coordinatorClient,
+      @JacksonInject @Nullable IndexingServiceClient indexingServiceClient,
+      @JacksonInject SegmentLoaderFactory segmentLoaderFactory,
+      @JacksonInject RetryPolicyFactory retryPolicyFactory,
+      @JacksonInject AppenderatorsManager appenderatorsManager
   )
   {
     super(getOrMakeId(id, TYPE, dataSource), null, taskResource, dataSource, context);
-    Preconditions.checkArgument(interval != null || segments != null, "interval or segments should be specified");
-    Preconditions.checkArgument(interval == null || segments == null, "one of interval and segments should be null");
 
-    if (interval != null && interval.toDurationMillis() == 0) {
-      throw new IAE("Interval[%s] is empty, must specify a nonempty interval", interval);
+    Checks.checkOneNotNullOrEmpty(
+        ImmutableList.of(
+            new Property<>("ioConfig", ioConfig),
+            new Property<>("interval", interval),
+            new Property<>("segments", segments)
+        )
+    );
+
+    if (ioConfig != null) {
+      this.ioConfig = ioConfig;
+    } else if (interval != null) {
+      this.ioConfig = new CompactionIOConfig(new CompactionIntervalSpec(interval, null));
+    } else {
+      // We already checked segments is not null or empty above.
+      //noinspection ConstantConditions
+      this.ioConfig = new CompactionIOConfig(SpecificSegmentsSpec.fromSegments(segments));
     }
 
-    this.interval = interval;
-    this.segments = segments;
-    this.dimensionsSpec = dimensionsSpec;
-    this.keepSegmentGranularity = keepSegmentGranularity == null
-                                  ? DEFAULT_KEEP_SEGMENT_GRANULARITY
-                                  : keepSegmentGranularity;
-    this.targetCompactionSizeBytes = targetCompactionSizeBytes;
-    this.tuningConfig = tuningConfig;
+    this.dimensionsSpec = dimensionsSpec == null ? dimensions : dimensionsSpec;
+    this.metricsSpec = metricsSpec;
+    this.segmentGranularity = segmentGranularity;
+    this.tuningConfig = tuningConfig != null ? getTuningConfig(tuningConfig) : null;
     this.jsonMapper = jsonMapper;
-    this.segmentProvider = segments == null ? new SegmentProvider(dataSource, interval) : new SegmentProvider(segments);
-    this.partitionConfigurationManager = new PartitionConfigurationManager(this.targetCompactionSizeBytes, tuningConfig);
+    this.segmentProvider = new SegmentProvider(dataSource, this.ioConfig.getInputSpec());
+    this.partitionConfigurationManager = new PartitionConfigurationManager(this.tuningConfig);
     this.authorizerMapper = authorizerMapper;
     this.chatHandlerProvider = chatHandlerProvider;
     this.rowIngestionMetersFactory = rowIngestionMetersFactory;
+    this.indexingServiceClient = indexingServiceClient;
+    this.coordinatorClient = coordinatorClient;
+    this.segmentLoaderFactory = segmentLoaderFactory;
+    this.retryPolicyFactory = retryPolicyFactory;
+    this.appenderatorsManager = appenderatorsManager;
   }
 
-  @JsonProperty
-  public Interval getInterval()
+  @VisibleForTesting
+  static ParallelIndexTuningConfig getTuningConfig(TuningConfig tuningConfig)
   {
-    return interval;
+    if (tuningConfig instanceof ParallelIndexTuningConfig) {
+      return (ParallelIndexTuningConfig) tuningConfig;
+    } else if (tuningConfig instanceof IndexTuningConfig) {
+      final IndexTuningConfig indexTuningConfig = (IndexTuningConfig) tuningConfig;
+      return new ParallelIndexTuningConfig(
+          null,
+          indexTuningConfig.getMaxRowsPerSegment(),
+          indexTuningConfig.getMaxRowsPerSegment(),
+          indexTuningConfig.getMaxBytesInMemory(),
+          indexTuningConfig.getMaxTotalRows(),
+          indexTuningConfig.getNumShards(),
+          null,
+          indexTuningConfig.getPartitionsSpec(),
+          indexTuningConfig.getIndexSpec(),
+          indexTuningConfig.getIndexSpecForIntermediatePersists(),
+          indexTuningConfig.getMaxPendingPersists(),
+          indexTuningConfig.isForceGuaranteedRollup(),
+          indexTuningConfig.isReportParseExceptions(),
+          indexTuningConfig.getPushTimeout(),
+          indexTuningConfig.getSegmentWriteOutMediumFactory(),
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          indexTuningConfig.isLogParseExceptions(),
+          indexTuningConfig.getMaxParseExceptions(),
+          indexTuningConfig.getMaxSavedParseExceptions()
+      );
+    } else {
+      throw new ISE(
+          "Unknown tuningConfig type: [%s], Must be either [%s] or [%s]",
+          tuningConfig.getClass().getName(),
+          ParallelIndexTuningConfig.class.getName(),
+          IndexTuningConfig.class.getName()
+      );
+    }
   }
 
-  @JsonProperty
-  public List<DataSegment> getSegments()
+  @VisibleForTesting
+  public CurrentSubTaskHolder getCurrentSubTaskHolder()
   {
-    return segments;
+    return currentSubTaskHolder;
   }
 
   @JsonProperty
+  public CompactionIOConfig getIoConfig()
+  {
+    return ioConfig;
+  }
+
+  @JsonProperty
+  @Nullable
   public DimensionsSpec getDimensionsSpec()
   {
     return dimensionsSpec;
   }
 
   @JsonProperty
-  public boolean isKeepSegmentGranularity()
+  @Nullable
+  public AggregatorFactory[] getMetricsSpec()
   {
-    return keepSegmentGranularity;
+    return metricsSpec;
+  }
+
+  @JsonProperty
+  @Nullable
+  @Override
+  public Granularity getSegmentGranularity()
+  {
+    return segmentGranularity;
   }
 
   @Nullable
   @JsonProperty
-  public Long getTargetCompactionSizeBytes()
-  {
-    return targetCompactionSizeBytes;
-  }
-
-  @Nullable
-  @JsonProperty
-  public IndexTuningConfig getTuningConfig()
+  public ParallelIndexTuningConfig getTuningConfig()
   {
     return tuningConfig;
   }
@@ -219,63 +340,94 @@ public class CompactionTask extends AbstractTask
     return getContextValue(Tasks.PRIORITY_KEY, Tasks.DEFAULT_MERGE_TASK_PRIORITY);
   }
 
-  @VisibleForTesting
-  SegmentProvider getSegmentProvider()
-  {
-    return segmentProvider;
-  }
-
   @Override
   public boolean isReady(TaskActionClient taskActionClient) throws Exception
   {
-    final SortedSet<Interval> intervals = new TreeSet<>(Comparators.intervalsByStartThenEnd());
-    intervals.add(segmentProvider.interval);
-    return IndexTask.isReady(taskActionClient, intervals);
+    final List<DataSegment> segments = segmentProvider.checkAndGetSegments(taskActionClient);
+    return determineLockGranularityandTryLockWithSegments(taskActionClient, segments);
   }
 
   @Override
-  public TaskStatus run(final TaskToolbox toolbox) throws Exception
+  public boolean requireLockExistingSegments()
   {
-    if (indexTaskSpecs == null) {
-      indexTaskSpecs = createIngestionSchema(
-          toolbox,
-          segmentProvider,
-          partitionConfigurationManager,
-          dimensionsSpec,
-          keepSegmentGranularity,
-          jsonMapper
-      ).stream()
-      .map(spec -> new IndexTask(
-          getId(),
-          getGroupId(),
-          getTaskResource(),
-          getDataSource(),
-          spec,
-          getContext(),
-          authorizerMapper,
-          chatHandlerProvider,
-          rowIngestionMetersFactory
-      ))
-      .collect(Collectors.toList());
-    }
+    return true;
+  }
+
+  @Override
+  public List<DataSegment> findSegmentsToLock(TaskActionClient taskActionClient, List<Interval> intervals)
+      throws IOException
+  {
+    return ImmutableList.copyOf(
+        taskActionClient.submit(new RetrieveUsedSegmentsAction(getDataSource(), null, intervals, Segments.ONLY_VISIBLE))
+    );
+  }
+
+  @Override
+  public boolean isPerfectRollup()
+  {
+    return tuningConfig != null && tuningConfig.isForceGuaranteedRollup();
+  }
+
+  @Override
+  public TaskStatus runTask(TaskToolbox toolbox) throws Exception
+  {
+    final List<ParallelIndexIngestionSpec> ingestionSpecs = createIngestionSchema(
+        toolbox,
+        segmentProvider,
+        partitionConfigurationManager,
+        dimensionsSpec,
+        metricsSpec,
+        segmentGranularity,
+        jsonMapper,
+        coordinatorClient,
+        segmentLoaderFactory,
+        retryPolicyFactory
+    );
+    final List<ParallelIndexSupervisorTask> indexTaskSpecs = IntStream
+        .range(0, ingestionSpecs.size())
+        .mapToObj(i -> {
+          // taskId is used for different purposes in parallel indexing and local indexing.
+          // In parallel indexing, it's the taskId of the supervisor task. This supervisor taskId must be
+          // a valid taskId to communicate with sub tasks properly. We use the ID of the compaction task in this case.
+          //
+          // In local indexing, it's used as the sequence name for Appenderator. Even though a compaction task can run
+          // multiple index tasks (one per interval), the appenderator is not shared by those tasks. Each task creates
+          // a new Appenderator on its own instead. As a result, they should use different sequence names to allocate
+          // new segmentIds properly. See IndexerSQLMetadataStorageCoordinator.allocatePendingSegments() for details.
+          // In this case, we use different fake IDs for each created index task.
+          final String subtaskId = tuningConfig == null || tuningConfig.getMaxNumConcurrentSubTasks() == 1
+                                   ? createIndexTaskSpecId(i)
+                                   : getId();
+          return newTask(subtaskId, ingestionSpecs.get(i));
+        })
+        .collect(Collectors.toList());
 
     if (indexTaskSpecs.isEmpty()) {
-      log.warn("Interval[%s] has no segments, nothing to do.", interval);
+      log.warn("Can't find segments from inputSpec[%s], nothing to do.", ioConfig.getInputSpec());
       return TaskStatus.failure(getId());
     } else {
+      registerResourceCloserOnAbnormalExit(currentSubTaskHolder);
       final int totalNumSpecs = indexTaskSpecs.size();
       log.info("Generated [%d] compaction task specs", totalNumSpecs);
 
       int failCnt = 0;
-      for (IndexTask eachSpec : indexTaskSpecs) {
+      for (ParallelIndexSupervisorTask eachSpec : indexTaskSpecs) {
         final String json = jsonMapper.writerWithDefaultPrettyPrinter().writeValueAsString(eachSpec);
-        log.info("Running indexSpec: " + json);
-
+        if (!currentSubTaskHolder.setTask(eachSpec)) {
+          log.info("Task is asked to stop. Finish as failed.");
+          return TaskStatus.failure(getId());
+        }
         try {
-          final TaskStatus eachResult = eachSpec.run(toolbox);
-          if (!eachResult.isSuccess()) {
+          if (eachSpec.isReady(toolbox.getTaskActionClient())) {
+            log.info("Running indexSpec: " + json);
+            final TaskStatus eachResult = eachSpec.run(toolbox);
+            if (!eachResult.isSuccess()) {
+              failCnt++;
+              log.warn("Failed to run indexSpec: [%s].\nTrying the next indexSpec.", json);
+            }
+          } else {
             failCnt++;
-            log.warn("Failed to run indexSpec: [%s].\nTrying the next indexSpec.", json);
+            log.warn("indexSpec is not ready: [%s].\nTrying the next indexSpec.", json);
           }
         }
         catch (Exception e) {
@@ -289,19 +441,55 @@ public class CompactionTask extends AbstractTask
     }
   }
 
+  @VisibleForTesting
+  ParallelIndexSupervisorTask newTask(String taskId, ParallelIndexIngestionSpec ingestionSpec)
+  {
+    return new ParallelIndexSupervisorTask(
+        taskId,
+        getGroupId(),
+        getTaskResource(),
+        ingestionSpec,
+        createContextForSubtask(),
+        indexingServiceClient,
+        chatHandlerProvider,
+        authorizerMapper,
+        rowIngestionMetersFactory,
+        appenderatorsManager
+    );
+  }
+
+  @VisibleForTesting
+  Map<String, Object> createContextForSubtask()
+  {
+    final Map<String, Object> newContext = new HashMap<>(getContext());
+    newContext.put(CTX_KEY_APPENDERATOR_TRACKING_TASK_ID, getId());
+    // Set the priority of the compaction task.
+    newContext.put(Tasks.PRIORITY_KEY, getPriority());
+    return newContext;
+  }
+
+  private String createIndexTaskSpecId(int i)
+  {
+    return StringUtils.format("%s_%d", getId(), i);
+  }
+
   /**
-   * Generate {@link IndexIngestionSpec} from input segments.
+   * Generate {@link ParallelIndexIngestionSpec} from input segments.
    *
    * @return an empty list if input segments don't exist. Otherwise, a generated ingestionSpec.
    */
   @VisibleForTesting
-  static List<IndexIngestionSpec> createIngestionSchema(
+  static List<ParallelIndexIngestionSpec> createIngestionSchema(
       final TaskToolbox toolbox,
       final SegmentProvider segmentProvider,
       final PartitionConfigurationManager partitionConfigurationManager,
-      final DimensionsSpec dimensionsSpec,
-      final boolean keepSegmentGranularity,
-      final ObjectMapper jsonMapper
+      @Nullable final DimensionsSpec dimensionsSpec,
+      @Nullable final AggregatorFactory[] metricsSpec,
+      @Nullable final Granularity segmentGranularity,
+      final ObjectMapper jsonMapper,
+      final CoordinatorClient coordinatorClient,
+      final SegmentLoaderFactory segmentLoaderFactory,
+      final RetryPolicyFactory retryPolicyFactory
   ) throws IOException, SegmentLoadingException
   {
     Pair<Map<DataSegment, File>, List<TimelineObjectHolder<String, DataSegment>>> pair = prepareSegments(
@@ -316,50 +504,50 @@ public class CompactionTask extends AbstractTask
     }
 
     // find metadata for interval
+    // queryableIndexAndSegments is sorted by the interval of the dataSegment
     final List<Pair<QueryableIndex, DataSegment>> queryableIndexAndSegments = loadSegments(
         timelineSegments,
         segmentFileMap,
         toolbox.getIndexIO()
     );
 
-    final IndexTuningConfig compactionTuningConfig = partitionConfigurationManager.computeTuningConfig(
-        queryableIndexAndSegments
-    );
+    final ParallelIndexTuningConfig compactionTuningConfig = partitionConfigurationManager.computeTuningConfig();
 
-    if (keepSegmentGranularity) {
-      // If keepSegmentGranularity = true, create indexIngestionSpec per segment interval, so that we can run an index
-      // task per segment interval.
+    if (segmentGranularity == null) {
+      // original granularity
+      final Map<Interval, List<Pair<QueryableIndex, DataSegment>>> intervalToSegments = new TreeMap<>(
+          Comparators.intervalsByStartThenEnd()
+      );
+      //noinspection ConstantConditions
+      queryableIndexAndSegments.forEach(
+          p -> intervalToSegments.computeIfAbsent(p.rhs.getInterval(), k -> new ArrayList<>())
+                                 .add(p)
+      );
 
-      //noinspection unchecked,ConstantConditions
-      final Map<Interval, List<Pair<QueryableIndex, DataSegment>>> intervalToSegments = queryableIndexAndSegments
-          .stream()
-          .collect(
-              Collectors.toMap(
-                  // rhs can't be null here so we skip null checking and supress the warning with the above comment
-                  p -> p.rhs.getInterval(),
-                  Lists::newArrayList,
-                  (l1, l2) -> {
-                    l1.addAll(l2);
-                    return l1;
-                  }
-              )
-          );
-      final List<IndexIngestionSpec> specs = new ArrayList<>(intervalToSegments.size());
+      final List<ParallelIndexIngestionSpec> specs = new ArrayList<>(intervalToSegments.size());
       for (Entry<Interval, List<Pair<QueryableIndex, DataSegment>>> entry : intervalToSegments.entrySet()) {
         final Interval interval = entry.getKey();
         final List<Pair<QueryableIndex, DataSegment>> segmentsToCompact = entry.getValue();
         final DataSchema dataSchema = createDataSchema(
             segmentProvider.dataSource,
-            interval,
             segmentsToCompact,
             dimensionsSpec,
+            metricsSpec,
+            GranularityType.fromPeriod(interval.toPeriod()).getDefaultGranularity(),
             jsonMapper
         );
 
         specs.add(
-            new IndexIngestionSpec(
+            new ParallelIndexIngestionSpec(
                 dataSchema,
-                createIoConfig(toolbox, dataSchema, interval),
+                createIoConfig(
+                    toolbox,
+                    dataSchema,
+                    interval,
+                    coordinatorClient,
+                    segmentLoaderFactory,
+                    retryPolicyFactory
+                ),
                 compactionTuningConfig
             )
         );
@@ -367,36 +555,57 @@ public class CompactionTask extends AbstractTask
 
       return specs;
     } else {
+      // given segment granularity
       final DataSchema dataSchema = createDataSchema(
           segmentProvider.dataSource,
-          segmentProvider.interval,
           queryableIndexAndSegments,
           dimensionsSpec,
+          metricsSpec,
+          segmentGranularity,
           jsonMapper
       );
 
       return Collections.singletonList(
-          new IndexIngestionSpec(
+          new ParallelIndexIngestionSpec(
               dataSchema,
-              createIoConfig(toolbox, dataSchema, segmentProvider.interval),
+              createIoConfig(
+                  toolbox,
+                  dataSchema,
+                  segmentProvider.interval,
+                  coordinatorClient,
+                  segmentLoaderFactory,
+                  retryPolicyFactory
+              ),
               compactionTuningConfig
           )
       );
     }
   }
 
-  private static IndexIOConfig createIoConfig(TaskToolbox toolbox, DataSchema dataSchema, Interval interval)
+  private static ParallelIndexIOConfig createIoConfig(
+      TaskToolbox toolbox,
+      DataSchema dataSchema,
+      Interval interval,
+      CoordinatorClient coordinatorClient,
+      SegmentLoaderFactory segmentLoaderFactory,
+      RetryPolicyFactory retryPolicyFactory
+  )
   {
-    return new IndexIOConfig(
-        new IngestSegmentFirehoseFactory(
+    return new ParallelIndexIOConfig(
+        null,
+        new DruidInputSource(
             dataSchema.getDataSource(),
             interval,
-            null, // no filter
-            // set dimensions and metrics names to make sure that the generated dataSchema is used for the firehose
-            dataSchema.getParser().getParseSpec().getDimensionsSpec().getDimensionNames(),
+            null,
+            null,
+            dataSchema.getDimensionsSpec().getDimensionNames(),
             Arrays.stream(dataSchema.getAggregators()).map(AggregatorFactory::getName).collect(Collectors.toList()),
-            toolbox.getIndexIO()
+            toolbox.getIndexIO(),
+            coordinatorClient,
+            segmentLoaderFactory,
+            retryPolicyFactory
         ),
+        null,
         false
     );
   }
@@ -406,7 +615,7 @@ public class CompactionTask extends AbstractTask
       SegmentProvider segmentProvider
   ) throws IOException, SegmentLoadingException
   {
-    final List<DataSegment> usedSegments = segmentProvider.checkAndGetSegments(toolbox);
+    final List<DataSegment> usedSegments = segmentProvider.checkAndGetSegments(toolbox.getTaskActionClient());
     final Map<DataSegment, File> segmentFileMap = toolbox.fetchSegments(usedSegments);
     final List<TimelineObjectHolder<String, DataSegment>> timelineSegments = VersionedIntervalTimeline
         .forSegments(usedSegments)
@@ -416,27 +625,19 @@ public class CompactionTask extends AbstractTask
 
   private static DataSchema createDataSchema(
       String dataSource,
-      Interval totalInterval,
       List<Pair<QueryableIndex, DataSegment>> queryableIndexAndSegments,
-      DimensionsSpec dimensionsSpec,
+      @Nullable DimensionsSpec dimensionsSpec,
+      @Nullable AggregatorFactory[] metricsSpec,
+      Granularity segmentGranularity,
       ObjectMapper jsonMapper
   )
   {
-    // find merged aggregators
+    // check index metadata
     for (Pair<QueryableIndex, DataSegment> pair : queryableIndexAndSegments) {
       final QueryableIndex index = pair.lhs;
       if (index.getMetadata() == null) {
-        throw new RE("Index metadata doesn't exist for segment[%s]", pair.rhs.getIdentifier());
+        throw new RE("Index metadata doesn't exist for segment[%s]", pair.rhs.getId());
       }
-    }
-    final List<AggregatorFactory[]> aggregatorFactories = queryableIndexAndSegments
-        .stream()
-        .map(pair -> pair.lhs.getMetadata().getAggregators()) // We have already done null check on index.getMetadata()
-        .collect(Collectors.toList());
-    final AggregatorFactory[] mergedAggregators = AggregatorFactory.mergeAggregators(aggregatorFactories);
-
-    if (mergedAggregators == null) {
-      throw new ISE("Failed to merge aggregators[%s]", aggregatorFactories);
     }
 
     // find granularity spec
@@ -447,26 +648,56 @@ public class CompactionTask extends AbstractTask
       return isRollup != null && isRollup;
     });
 
-    final GranularitySpec granularitySpec = new ArbitraryGranularitySpec(
+    final Interval totalInterval = JodaUtils.umbrellaInterval(
+        queryableIndexAndSegments.stream().map(p -> p.rhs.getInterval()).collect(Collectors.toList())
+    );
+
+    final GranularitySpec granularitySpec = new UniformGranularitySpec(
+        Preconditions.checkNotNull(segmentGranularity),
         Granularities.NONE,
         rollup,
         Collections.singletonList(totalInterval)
     );
 
     // find unique dimensions
-    final DimensionsSpec finalDimensionsSpec = dimensionsSpec == null ?
-                                               createDimensionsSpec(queryableIndexAndSegments) :
-                                               dimensionsSpec;
-    final InputRowParser parser = new NoopInputRowParser(new TimeAndDimsParseSpec(null, finalDimensionsSpec));
+    final DimensionsSpec finalDimensionsSpec = dimensionsSpec == null
+                                               ? createDimensionsSpec(queryableIndexAndSegments)
+                                               : dimensionsSpec;
+    final AggregatorFactory[] finalMetricsSpec = metricsSpec == null
+                                                 ? createMetricsSpec(queryableIndexAndSegments)
+                                                 : convertToCombiningFactories(metricsSpec);
 
     return new DataSchema(
         dataSource,
-        jsonMapper.convertValue(parser, JacksonUtils.TYPE_REFERENCE_MAP_STRING_OBJECT),
-        mergedAggregators,
+        new TimestampSpec(null, null, null),
+        finalDimensionsSpec,
+        finalMetricsSpec,
         granularitySpec,
-        null,
-        jsonMapper
+        null
     );
+  }
+
+  private static AggregatorFactory[] createMetricsSpec(
+      List<Pair<QueryableIndex, DataSegment>> queryableIndexAndSegments
+  )
+  {
+    final List<AggregatorFactory[]> aggregatorFactories = queryableIndexAndSegments
+        .stream()
+        .map(pair -> pair.lhs.getMetadata().getAggregators()) // We have already done null check on index.getMetadata()
+        .collect(Collectors.toList());
+    final AggregatorFactory[] mergedAggregators = AggregatorFactory.mergeAggregators(aggregatorFactories);
+
+    if (mergedAggregators == null) {
+      throw new ISE("Failed to merge aggregators[%s]", aggregatorFactories);
+    }
+    return mergedAggregators;
+  }
+
+  private static AggregatorFactory[] convertToCombiningFactories(AggregatorFactory[] metricsSpec)
+  {
+    return Arrays.stream(metricsSpec)
+                 .map(AggregatorFactory::getCombiningFactory)
+                 .toArray(AggregatorFactory[]::new);
   }
 
   private static DimensionsSpec createDimensionsSpec(List<Pair<QueryableIndex, DataSegment>> queryableIndices)
@@ -488,9 +719,9 @@ public class CompactionTask extends AbstractTask
           intervalComparator.compare(shouldBeSmaller, shouldBeLarger) <= 0,
           "QueryableIndexes are not sorted! Interval[%s] of segment[%s] is laster than interval[%s] of segment[%s]",
           shouldBeSmaller,
-          queryableIndices.get(i).rhs.getIdentifier(),
+          queryableIndices.get(i).rhs.getId(),
           shouldBeLarger,
-          queryableIndices.get(i + 1).rhs.getIdentifier()
+          queryableIndices.get(i + 1).rhs.getId()
       );
     }
 
@@ -555,7 +786,7 @@ public class CompactionTask extends AbstractTask
       for (PartitionChunk<DataSegment> chunk : partitionHolder) {
         final DataSegment segment = chunk.getObject();
         final QueryableIndex queryableIndex = indexIO.loadIndex(
-            Preconditions.checkNotNull(segmentFileMap.get(segment), "File for segment %s", segment.getIdentifier())
+            Preconditions.checkNotNull(segmentFileMap.get(segment), "File for segment %s", segment.getId())
         );
         segments.add(Pair.of(queryableIndex, segment));
       }
@@ -604,68 +835,27 @@ public class CompactionTask extends AbstractTask
   static class SegmentProvider
   {
     private final String dataSource;
+    private final CompactionInputSpec inputSpec;
     private final Interval interval;
-    private final List<DataSegment> segments;
 
-    SegmentProvider(String dataSource, Interval interval)
+    SegmentProvider(String dataSource, CompactionInputSpec inputSpec)
     {
       this.dataSource = Preconditions.checkNotNull(dataSource);
-      this.interval = Preconditions.checkNotNull(interval);
-      this.segments = null;
+      this.inputSpec = inputSpec;
+      this.interval = inputSpec.findInterval(dataSource);
     }
 
-    SegmentProvider(List<DataSegment> segments)
+    List<DataSegment> checkAndGetSegments(TaskActionClient actionClient) throws IOException
     {
-      Preconditions.checkArgument(segments != null && !segments.isEmpty());
-      final String dataSource = segments.get(0).getDataSource();
-      Preconditions.checkArgument(
-          segments.stream().allMatch(segment -> segment.getDataSource().equals(dataSource)),
-          "segments should have the same dataSource"
+      final List<DataSegment> latestSegments = new ArrayList<>(
+          actionClient.submit(new RetrieveUsedSegmentsAction(dataSource, interval, null, Segments.ONLY_VISIBLE))
       );
-      this.segments = segments;
-      this.dataSource = dataSource;
-      this.interval = JodaUtils.umbrellaInterval(
-          segments.stream().map(DataSegment::getInterval).collect(Collectors.toList())
-      );
-    }
 
-    List<DataSegment> getSegments()
-    {
-      return segments;
-    }
-
-    List<DataSegment> checkAndGetSegments(TaskToolbox toolbox) throws IOException
-    {
-      final List<DataSegment> usedSegments = toolbox.getTaskActionClient().submit(
-          new SegmentListUsedAction(dataSource, interval, null)
-      );
-      final TimelineLookup<String, DataSegment> timeline = VersionedIntervalTimeline.forSegments(usedSegments);
-      final List<DataSegment> latestSegments = timeline
-          .lookup(interval)
-          .stream()
-          .map(TimelineObjectHolder::getObject)
-          .flatMap(partitionHolder -> StreamSupport.stream(partitionHolder.spliterator(), false))
-          .map(PartitionChunk::getObject)
-          .collect(Collectors.toList());
-
-      if (segments != null) {
-        Collections.sort(latestSegments);
-        Collections.sort(segments);
-
-        if (!latestSegments.equals(segments)) {
-          final List<DataSegment> unknownSegments = segments.stream()
-                                                            .filter(segment -> !latestSegments.contains(segment))
-                                                            .collect(Collectors.toList());
-          final List<DataSegment> missingSegments = latestSegments.stream()
-                                                                  .filter(segment -> !segments.contains(segment))
-                                                                  .collect(Collectors.toList());
-          throw new ISE(
-              "Specified segments in the spec are different from the current used segments. "
-              + "There are unknown segments[%s] and missing segments[%s] in the spec.",
-              unknownSegments,
-              missingSegments
-          );
-        }
+      if (!inputSpec.validateSegments(latestSegments)) {
+        throw new ISE(
+            "Specified segments in the spec are different from the current used segments. "
+            + "Possibly new segments would have been added or some segments have been unpublished."
+        );
       }
       return latestSegments;
     }
@@ -675,100 +865,155 @@ public class CompactionTask extends AbstractTask
   static class PartitionConfigurationManager
   {
     @Nullable
-    private final Long targetCompactionSizeBytes;
-    @Nullable
-    private final IndexTuningConfig tuningConfig;
+    private final ParallelIndexTuningConfig tuningConfig;
 
-    PartitionConfigurationManager(@Nullable Long targetCompactionSizeBytes, @Nullable IndexTuningConfig tuningConfig)
+    PartitionConfigurationManager(@Nullable ParallelIndexTuningConfig tuningConfig)
     {
-      this.targetCompactionSizeBytes = getValidTargetCompactionSizeBytes(targetCompactionSizeBytes, tuningConfig);
       this.tuningConfig = tuningConfig;
     }
 
     @Nullable
-    IndexTuningConfig computeTuningConfig(List<Pair<QueryableIndex, DataSegment>> queryableIndexAndSegments)
+    ParallelIndexTuningConfig computeTuningConfig()
     {
-      if (!hasPartitionConfig(tuningConfig)) {
-        final long nonNullTargetCompactionSizeBytes = Preconditions.checkNotNull(
-            targetCompactionSizeBytes,
-            "targetCompactionSizeBytes"
+      ParallelIndexTuningConfig newTuningConfig = tuningConfig == null
+                                          ? ParallelIndexTuningConfig.defaultConfig()
+                                          : tuningConfig;
+      PartitionsSpec partitionsSpec = newTuningConfig.getGivenOrDefaultPartitionsSpec();
+      if (partitionsSpec instanceof DynamicPartitionsSpec) {
+        final DynamicPartitionsSpec dynamicPartitionsSpec = (DynamicPartitionsSpec) partitionsSpec;
+        partitionsSpec = new DynamicPartitionsSpec(
+            dynamicPartitionsSpec.getMaxRowsPerSegment(),
+            // Setting maxTotalRows to Long.MAX_VALUE to respect the computed maxRowsPerSegment.
+            // If this is set to something too small, compactionTask can generate small segments
+            // which need to be compacted again, which in turn making auto compaction stuck in the same interval.
+            dynamicPartitionsSpec.getMaxTotalRowsOr(Long.MAX_VALUE)
         );
-        // Find IndexTuningConfig.targetPartitionSize which is the number of rows per segment.
-        // Assume that the segment size is proportional to the number of rows. We can improve this later.
-        final long totalNumRows = queryableIndexAndSegments
-            .stream()
-            .mapToLong(queryableIndexAndDataSegment -> queryableIndexAndDataSegment.lhs.getNumRows())
-            .sum();
-        final long totalSizeBytes = queryableIndexAndSegments
-            .stream()
-            .mapToLong(queryableIndexAndDataSegment -> queryableIndexAndDataSegment.rhs.getSize())
-            .sum();
-
-        if (totalSizeBytes == 0L) {
-          throw new ISE("Total input segment size is 0 byte");
-        }
-
-        final double avgRowsPerByte = totalNumRows / (double) totalSizeBytes;
-        final int targetPartitionSize = Math.toIntExact(Math.round(avgRowsPerByte * nonNullTargetCompactionSizeBytes));
-        Preconditions.checkState(targetPartitionSize > 0, "Negative targetPartitionSize[%s]", targetPartitionSize);
-
-        log.info(
-            "Estimated targetPartitionSize[%d] = avgRowsPerByte[%f] * targetCompactionSizeBytes[%d]",
-            targetPartitionSize,
-            avgRowsPerByte,
-            nonNullTargetCompactionSizeBytes
-        );
-        return (tuningConfig == null ? IndexTuningConfig.createDefault() : tuningConfig)
-            .withTargetPartitionSize(targetPartitionSize);
-      } else {
-        return tuningConfig;
       }
+      return newTuningConfig.withPartitionsSpec(partitionsSpec);
     }
+  }
 
-    /**
-     * Check the validity of {@link #targetCompactionSizeBytes} and return a valid value. Note that
-     * targetCompactionSizeBytes cannot be used with {@link IndexTuningConfig#targetPartitionSize},
-     * {@link IndexTuningConfig#maxTotalRows}, or {@link IndexTuningConfig#numShards} together.
-     * {@link #hasPartitionConfig} checks one of those configs is set.
-     *
-     * This throws an {@link IllegalArgumentException} if targetCompactionSizeBytes is set and hasPartitionConfig
-     * returns true. If targetCompactionSizeBytes is not set, this returns null or
-     * {@link DataSourceCompactionConfig#DEFAULT_TARGET_COMPACTION_SIZE_BYTES} according to the result of
-     * hasPartitionConfig.
-     */
+  public static class Builder
+  {
+    private final String dataSource;
+    private final ObjectMapper jsonMapper;
+    private final AuthorizerMapper authorizerMapper;
+    private final ChatHandlerProvider chatHandlerProvider;
+    private final RowIngestionMetersFactory rowIngestionMetersFactory;
+    private final IndexingServiceClient indexingServiceClient;
+    private final CoordinatorClient coordinatorClient;
+    private final SegmentLoaderFactory segmentLoaderFactory;
+    private final RetryPolicyFactory retryPolicyFactory;
+    private final AppenderatorsManager appenderatorsManager;
+
+    private CompactionIOConfig ioConfig;
     @Nullable
-    private static Long getValidTargetCompactionSizeBytes(
-        @Nullable Long targetCompactionSizeBytes,
-        @Nullable IndexTuningConfig tuningConfig
+    private DimensionsSpec dimensionsSpec;
+    @Nullable
+    private AggregatorFactory[] metricsSpec;
+    @Nullable
+    private Granularity segmentGranularity;
+    @Nullable
+    private TuningConfig tuningConfig;
+    @Nullable
+    private Map<String, Object> context;
+
+    public Builder(
+        String dataSource,
+        ObjectMapper jsonMapper,
+        AuthorizerMapper authorizerMapper,
+        ChatHandlerProvider chatHandlerProvider,
+        RowIngestionMetersFactory rowIngestionMetersFactory,
+        IndexingServiceClient indexingServiceClient,
+        CoordinatorClient coordinatorClient,
+        SegmentLoaderFactory segmentLoaderFactory,
+        RetryPolicyFactory retryPolicyFactory,
+        AppenderatorsManager appenderatorsManager
     )
     {
-      if (targetCompactionSizeBytes != null) {
-        Preconditions.checkArgument(
-            !hasPartitionConfig(tuningConfig),
-            "targetCompactionSizeBytes[%s] cannot be used with targetPartitionSize[%s], maxTotalRows[%s],"
-            + " or numShards[%s] of tuningConfig",
-            targetCompactionSizeBytes,
-            tuningConfig == null ? null : tuningConfig.getTargetPartitionSize(),
-            tuningConfig == null ? null : tuningConfig.getMaxTotalRows(),
-            tuningConfig == null ? null : tuningConfig.getNumShards()
-        );
-        return targetCompactionSizeBytes;
-      } else {
-        return hasPartitionConfig(tuningConfig)
-               ? null
-               : DataSourceCompactionConfig.DEFAULT_TARGET_COMPACTION_SIZE_BYTES;
-      }
+      this.dataSource = dataSource;
+      this.jsonMapper = jsonMapper;
+      this.authorizerMapper = authorizerMapper;
+      this.chatHandlerProvider = chatHandlerProvider;
+      this.rowIngestionMetersFactory = rowIngestionMetersFactory;
+      this.indexingServiceClient = indexingServiceClient;
+      this.coordinatorClient = coordinatorClient;
+      this.segmentLoaderFactory = segmentLoaderFactory;
+      this.retryPolicyFactory = retryPolicyFactory;
+      this.appenderatorsManager = appenderatorsManager;
     }
 
-    private static boolean hasPartitionConfig(@Nullable IndexTuningConfig tuningConfig)
+    public Builder interval(Interval interval)
     {
-      if (tuningConfig != null) {
-        return tuningConfig.getTargetPartitionSize() != null
-               || tuningConfig.getMaxTotalRows() != null
-               || tuningConfig.getNumShards() != null;
-      } else {
-        return false;
-      }
+      return inputSpec(new CompactionIntervalSpec(interval, null));
+    }
+
+    public Builder segments(List<DataSegment> segments)
+    {
+      return inputSpec(SpecificSegmentsSpec.fromSegments(segments));
+    }
+
+    public Builder inputSpec(CompactionInputSpec inputSpec)
+    {
+      this.ioConfig = new CompactionIOConfig(inputSpec);
+      return this;
+    }
+
+    public Builder dimensionsSpec(DimensionsSpec dimensionsSpec)
+    {
+      this.dimensionsSpec = dimensionsSpec;
+      return this;
+    }
+
+    public Builder metricsSpec(AggregatorFactory[] metricsSpec)
+    {
+      this.metricsSpec = metricsSpec;
+      return this;
+    }
+
+    public Builder segmentGranularity(Granularity segmentGranularity)
+    {
+      this.segmentGranularity = segmentGranularity;
+      return this;
+    }
+
+    public Builder tuningConfig(TuningConfig tuningConfig)
+    {
+      this.tuningConfig = tuningConfig;
+      return this;
+    }
+
+    public Builder context(Map<String, Object> context)
+    {
+      this.context = context;
+      return this;
+    }
+
+    public CompactionTask build()
+    {
+      return new CompactionTask(
+          null,
+          null,
+          dataSource,
+          null,
+          null,
+          ioConfig,
+          null,
+          dimensionsSpec,
+          metricsSpec,
+          segmentGranularity,
+          tuningConfig,
+          context,
+          jsonMapper,
+          authorizerMapper,
+          chatHandlerProvider,
+          rowIngestionMetersFactory,
+          coordinatorClient,
+          indexingServiceClient,
+          segmentLoaderFactory,
+          retryPolicyFactory,
+          appenderatorsManager
+      );
     }
   }
 }

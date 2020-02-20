@@ -20,12 +20,10 @@
 package org.apache.druid.segment.realtime.plumber;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
-import com.google.common.io.Files;
-import com.google.common.util.concurrent.MoreExecutors;
-import org.apache.commons.io.FileUtils;
 import org.apache.druid.client.cache.CachePopulatorStats;
 import org.apache.druid.client.cache.MapCache;
 import org.apache.druid.data.input.Committer;
@@ -37,7 +35,9 @@ import org.apache.druid.data.input.impl.StringInputRowParser;
 import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.DateTimes;
+import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.query.DefaultQueryRunnerFactoryConglomerate;
@@ -50,6 +50,7 @@ import org.apache.druid.segment.indexing.DataSchema;
 import org.apache.druid.segment.indexing.RealtimeTuningConfig;
 import org.apache.druid.segment.indexing.TuningConfigs;
 import org.apache.druid.segment.indexing.granularity.UniformGranularitySpec;
+import org.apache.druid.segment.join.NoopJoinableFactory;
 import org.apache.druid.segment.loading.DataSegmentPusher;
 import org.apache.druid.segment.realtime.FireDepartmentMetrics;
 import org.apache.druid.segment.realtime.FireDepartmentTest;
@@ -79,6 +80,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /**
+ *
  */
 @RunWith(Parameterized.class)
 public class RealtimePlumberSchoolTest
@@ -115,7 +117,10 @@ public class RealtimePlumberSchoolTest
   private FireDepartmentMetrics metrics;
   private File tmpDir;
 
-  public RealtimePlumberSchoolTest(RejectionPolicyFactory rejectionPolicy, SegmentWriteOutMediumFactory segmentWriteOutMediumFactory)
+  public RealtimePlumberSchoolTest(
+      RejectionPolicyFactory rejectionPolicy,
+      SegmentWriteOutMediumFactory segmentWriteOutMediumFactory
+  )
   {
     this.rejectionPolicy = rejectionPolicy;
     this.segmentWriteOutMediumFactory = segmentWriteOutMediumFactory;
@@ -124,7 +129,7 @@ public class RealtimePlumberSchoolTest
   @Before
   public void setUp() throws Exception
   {
-    tmpDir = Files.createTempDir();
+    tmpDir = FileUtils.createTempDir();
 
     ObjectMapper jsonMapper = new DefaultObjectMapper();
 
@@ -202,6 +207,7 @@ public class RealtimePlumberSchoolTest
         null,
         null,
         null,
+        null,
         true,
         0,
         0,
@@ -219,7 +225,8 @@ public class RealtimePlumberSchoolTest
         announcer,
         segmentPublisher,
         handoffNotifierFactory,
-        MoreExecutors.sameThreadExecutor(),
+        Execs.directExecutor(),
+        NoopJoinableFactory.INSTANCE,
         TestHelper.getTestIndexMergerV9(segmentWriteOutMediumFactory),
         TestHelper.getTestIndexIO(),
         MapCache.create(0),
@@ -330,15 +337,10 @@ public class RealtimePlumberSchoolTest
     final CountDownLatch doneSignal = new CountDownLatch(1);
 
     plumber.persist(
-        Committers.supplierFromRunnable(
-            new Runnable()
-            {
-              @Override
-              public void run()
-              {
-                doneSignal.countDown();
-                throw new RuntimeException();
-              }
+        supplierFromRunnable(
+            () -> {
+              doneSignal.countDown();
+              throw new RuntimeException();
             }
         ).get()
     );
@@ -677,4 +679,22 @@ public class RealtimePlumberSchoolTest
     };
   }
 
+  private static Supplier<Committer> supplierFromRunnable(final Runnable runnable)
+  {
+    final Committer committer = new Committer()
+    {
+      @Override
+      public Object getMetadata()
+      {
+        return null;
+      }
+
+      @Override
+      public void run()
+      {
+        runnable.run();
+      }
+    };
+    return Suppliers.ofInstance(committer);
+  }
 }

@@ -20,9 +20,11 @@
 package org.apache.druid.query.aggregation.cardinality;
 
 import org.apache.druid.hll.HyperLogLogCollector;
+import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.query.ColumnSelectorPlus;
 import org.apache.druid.query.aggregation.BufferAggregator;
 import org.apache.druid.query.aggregation.cardinality.types.CardinalityAggregatorColumnSelectorStrategy;
+import org.apache.druid.query.aggregation.hyperloglog.HyperUniquesBufferAggregator;
 import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
 
 import java.nio.ByteBuffer;
@@ -31,8 +33,6 @@ public class CardinalityBufferAggregator implements BufferAggregator
 {
   private final ColumnSelectorPlus<CardinalityAggregatorColumnSelectorStrategy>[] selectorPluses;
   private final boolean byRow;
-
-  private static final byte[] EMPTY_BYTES = HyperLogLogCollector.makeEmptyVersionedByteArray();
 
   CardinalityBufferAggregator(
       ColumnSelectorPlus<CardinalityAggregatorColumnSelectorStrategy>[] selectorPluses,
@@ -46,9 +46,7 @@ public class CardinalityBufferAggregator implements BufferAggregator
   @Override
   public void init(ByteBuffer buf, int position)
   {
-    final ByteBuffer mutationBuffer = buf.duplicate();
-    mutationBuffer.position(position);
-    mutationBuffer.put(EMPTY_BYTES);
+    HyperUniquesBufferAggregator.doInit(buf, position);
   }
 
   @Override
@@ -77,11 +75,7 @@ public class CardinalityBufferAggregator implements BufferAggregator
   @Override
   public Object get(ByteBuffer buf, int position)
   {
-    ByteBuffer dataCopyBuffer = ByteBuffer.allocate(HyperLogLogCollector.getLatestNumBytesForDenseStorage());
-    ByteBuffer mutationBuffer = buf.duplicate();
-    mutationBuffer.position(position);
-    mutationBuffer.get(dataCopyBuffer.array());
-    return HyperLogLogCollector.makeCollector(dataCopyBuffer);
+    return HyperUniquesBufferAggregator.doGet(buf, position);
   }
 
   @Override
@@ -112,6 +106,8 @@ public class CardinalityBufferAggregator implements BufferAggregator
   @Override
   public void inspectRuntimeShape(RuntimeShapeInspector inspector)
   {
-    inspector.visit("selectorPluses", selectorPluses);
+    for (int i = 0; i < selectorPluses.length; i++) {
+      inspector.visit(StringUtils.format("selector-%d", i), selectorPluses[i].getSelector());
+    }
   }
 }

@@ -51,7 +51,7 @@ import java.util.Set;
 
 public class S3DataSegmentMoverTest
 {
-  private static final DataSegment sourceSegment = new DataSegment(
+  private static final DataSegment SOURCE_SEGMENT = new DataSegment(
       "test",
       Intervals.of("2013-01-01/2013-01-02"),
       "1",
@@ -78,18 +78,17 @@ public class S3DataSegmentMoverTest
         "main",
         "baseKey/test/2013-01-01T00:00:00.000Z_2013-01-02T00:00:00.000Z/1/0/index.zip"
     );
-    mockS3Client.putObject(
-        "main",
-        "baseKey/test/2013-01-01T00:00:00.000Z_2013-01-02T00:00:00.000Z/1/0/descriptor.json"
-    );
 
     DataSegment movedSegment = mover.move(
-        sourceSegment,
+        SOURCE_SEGMENT,
         ImmutableMap.of("baseKey", "targetBaseKey", "bucket", "archive")
     );
 
     Map<String, Object> targetLoadSpec = movedSegment.getLoadSpec();
-    Assert.assertEquals("targetBaseKey/test/2013-01-01T00:00:00.000Z_2013-01-02T00:00:00.000Z/1/0/index.zip", MapUtils.getString(targetLoadSpec, "key"));
+    Assert.assertEquals(
+        "targetBaseKey/test/2013-01-01T00:00:00.000Z_2013-01-02T00:00:00.000Z/1/0/index.zip",
+        MapUtils.getString(targetLoadSpec, "key")
+    );
     Assert.assertEquals("archive", MapUtils.getString(targetLoadSpec, "bucket"));
     Assert.assertTrue(mockS3Client.didMove());
   }
@@ -104,19 +103,18 @@ public class S3DataSegmentMoverTest
         "archive",
         "targetBaseKey/test/2013-01-01T00:00:00.000Z_2013-01-02T00:00:00.000Z/1/0/index.zip"
     );
-    mockS3Client.putObject(
-        "archive",
-        "targetBaseKey/test/2013-01-01T00:00:00.000Z_2013-01-02T00:00:00.000Z/1/0/descriptor.json"
-    );
 
     DataSegment movedSegment = mover.move(
-        sourceSegment,
+        SOURCE_SEGMENT,
         ImmutableMap.of("baseKey", "targetBaseKey", "bucket", "archive")
     );
 
     Map<String, Object> targetLoadSpec = movedSegment.getLoadSpec();
 
-    Assert.assertEquals("targetBaseKey/test/2013-01-01T00:00:00.000Z_2013-01-02T00:00:00.000Z/1/0/index.zip", MapUtils.getString(targetLoadSpec, "key"));
+    Assert.assertEquals(
+        "targetBaseKey/test/2013-01-01T00:00:00.000Z_2013-01-02T00:00:00.000Z/1/0/index.zip",
+        MapUtils.getString(targetLoadSpec, "key")
+    );
     Assert.assertEquals("archive", MapUtils.getString(targetLoadSpec, "bucket"));
     Assert.assertFalse(mockS3Client.didMove());
   }
@@ -128,7 +126,7 @@ public class S3DataSegmentMoverTest
     S3DataSegmentMover mover = new S3DataSegmentMover(mockS3Client, new S3DataSegmentPusherConfig());
 
     mover.move(
-        sourceSegment,
+        SOURCE_SEGMENT,
         ImmutableMap.of("baseKey", "targetBaseKey", "bucket", "archive")
     );
   }
@@ -269,10 +267,7 @@ public class S3DataSegmentMoverTest
     @Override
     public PutObjectResult putObject(String bucketName, String key, File file)
     {
-      if (!storage.containsKey(bucketName)) {
-        storage.put(bucketName, new HashSet<>());
-      }
-      storage.get(bucketName).add(key);
+      storage.computeIfAbsent(bucketName, bName -> new HashSet<>()).add(key);
       return new PutObjectResult();
     }
   }

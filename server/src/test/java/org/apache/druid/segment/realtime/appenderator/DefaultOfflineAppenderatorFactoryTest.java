@@ -144,6 +144,7 @@ public class DefaultOfflineAppenderatorFactoryTest
         null,
         null,
         null,
+        null,
         0,
         0,
         null,
@@ -153,26 +154,30 @@ public class DefaultOfflineAppenderatorFactoryTest
         null
     );
 
-    try (Appenderator appenderator = defaultOfflineAppenderatorFactory.build(
+    Appenderator appenderator = defaultOfflineAppenderatorFactory.build(
         schema,
         tuningConfig,
         new FireDepartmentMetrics()
-    )) {
+    );
+    try {
       Assert.assertEquals("dataSourceName", appenderator.getDataSource());
       Assert.assertEquals(null, appenderator.startJob());
-      SegmentIdentifier identifier = new SegmentIdentifier(
+      SegmentIdWithShardSpec identifier = new SegmentIdWithShardSpec(
           "dataSourceName",
           Intervals.of("2000/2001"),
           "A",
           new LinearShardSpec(0)
       );
       Assert.assertEquals(0, ((AppenderatorImpl) appenderator).getRowsInMemory());
-      appenderator.add(identifier, AppenderatorTest.IR("2000", "bar", 1), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(identifier, AppenderatorTest.ir("2000", "bar", 1), Suppliers.ofInstance(Committers.nil()));
       Assert.assertEquals(1, ((AppenderatorImpl) appenderator).getRowsInMemory());
-      appenderator.add(identifier, AppenderatorTest.IR("2000", "baz", 1), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(identifier, AppenderatorTest.ir("2000", "baz", 1), Suppliers.ofInstance(Committers.nil()));
       Assert.assertEquals(2, ((AppenderatorImpl) appenderator).getRowsInMemory());
       appenderator.close();
       Assert.assertEquals(0, ((AppenderatorImpl) appenderator).getRowsInMemory());
+    }
+    finally {
+      appenderator.close();
     }
   }
 }

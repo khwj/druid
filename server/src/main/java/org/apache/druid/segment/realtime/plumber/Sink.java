@@ -19,7 +19,6 @@
 
 package org.apache.druid.segment.realtime.plumber;
 
-import com.google.common.base.Function;
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterators;
@@ -37,13 +36,15 @@ import org.apache.druid.segment.incremental.IncrementalIndexSchema;
 import org.apache.druid.segment.incremental.IndexSizeExceededException;
 import org.apache.druid.segment.indexing.DataSchema;
 import org.apache.druid.segment.realtime.FireHydrant;
+import org.apache.druid.timeline.CompactionState;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.Overshadowable;
 import org.apache.druid.timeline.partition.ShardSpec;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
-import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -54,19 +55,22 @@ import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class Sink implements Iterable<FireHydrant>
+public class Sink implements Iterable<FireHydrant>, Overshadowable<Sink>
 {
-  private static final IncrementalIndexAddResult ALREADY_SWAPPED = new IncrementalIndexAddResult(-1, -1, null, "write after index swapped");
+  private static final IncrementalIndexAddResult ALREADY_SWAPPED =
+      new IncrementalIndexAddResult(-1, -1, null, "write after index swapped");
 
   private final Object hydrantLock = new Object();
   private final Interval interval;
   private final DataSchema schema;
   private final ShardSpec shardSpec;
+  @Nullable
+  private final CompactionState compactionState;
   private final String version;
   private final int maxRowsInMemory;
   private final long maxBytesInMemory;
   private final boolean reportParseExceptions;
-  private final CopyOnWriteArrayList<FireHydrant> hydrants = new CopyOnWriteArrayList<FireHydrant>();
+  private final CopyOnWriteArrayList<FireHydrant> hydrants = new CopyOnWriteArrayList<>();
   private final LinkedHashSet<String> dimOrder = new LinkedHashSet<>();
   private final AtomicInteger numRowsExcludingCurrIndex = new AtomicInteger();
   private volatile FireHydrant currHydrant;
@@ -85,22 +89,51 @@ public class Sink implements Iterable<FireHydrant>
       String dedupColumn
   )
   {
-    this.schema = schema;
-    this.shardSpec = shardSpec;
-    this.interval = interval;
-    this.version = version;
-    this.maxRowsInMemory = maxRowsInMemory;
-    this.maxBytesInMemory = maxBytesInMemory;
-    this.reportParseExceptions = reportParseExceptions;
-    this.dedupColumn = dedupColumn;
-
-    makeNewCurrIndex(interval.getStartMillis(), schema);
+    this(
+        interval,
+        schema,
+        shardSpec,
+        null,
+        version,
+        maxRowsInMemory,
+        maxBytesInMemory,
+        reportParseExceptions,
+        dedupColumn,
+        Collections.emptyList()
+    );
   }
 
   public Sink(
       Interval interval,
       DataSchema schema,
       ShardSpec shardSpec,
+      @Nullable CompactionState compactionState,
+      String version,
+      int maxRowsInMemory,
+      long maxBytesInMemory,
+      boolean reportParseExceptions,
+      String dedupColumn
+  )
+  {
+    this(
+        interval,
+        schema,
+        shardSpec,
+        compactionState,
+        version,
+        maxRowsInMemory,
+        maxBytesInMemory,
+        reportParseExceptions,
+        dedupColumn,
+        Collections.emptyList()
+    );
+  }
+
+  public Sink(
+      Interval interval,
+      DataSchema schema,
+      ShardSpec shardSpec,
+      @Nullable CompactionState compactionState,
       String version,
       int maxRowsInMemory,
       long maxBytesInMemory,
@@ -111,6 +144,7 @@ public class Sink implements Iterable<FireHydrant>
   {
     this.schema = schema;
     this.shardSpec = shardSpec;
+    this.compactionState = compactionState;
     this.interval = interval;
     this.version = version;
     this.maxRowsInMemory = maxRowsInMemory;
@@ -141,11 +175,6 @@ public class Sink implements Iterable<FireHydrant>
   public void clearDedupCache()
   {
     dedupSet.clear();
-  }
-
-  public String getVersion()
-  {
-    return version;
   }
 
   public Interval getInterval()
@@ -246,18 +275,10 @@ public class Sink implements Iterable<FireHydrant>
         interval,
         version,
         ImmutableMap.of(),
-        new ArrayList<>(),
-        Lists.transform(
-            Arrays.asList(schema.getAggregators()), new Function<AggregatorFactory, String>()
-            {
-              @Override
-              public String apply(@Nullable AggregatorFactory input)
-              {
-                return input.getName();
-              }
-            }
-        ),
+        Collections.emptyList(),
+        Lists.transform(Arrays.asList(schema.getAggregators()), AggregatorFactory::getName),
         shardSpec,
+        compactionState,
         null,
         0
     );
@@ -290,7 +311,7 @@ public class Sink implements Iterable<FireHydrant>
         return 0;
       }
 
-      return currHydrant.getIndex().getBytesInMemory();
+      return currHydrant.getIndex().getBytesInMemory().get();
     }
   }
 
@@ -333,9 +354,9 @@ public class Sink implements Iterable<FireHydrant>
   {
     final IncrementalIndexSchema indexSchema = new IncrementalIndexSchema.Builder()
         .withMinTimestamp(minTimestamp)
-        .withTimestampSpec(schema.getParser())
+        .withTimestampSpec(schema.getTimestampSpec())
         .withQueryGranularity(schema.getGranularitySpec().getQueryGranularity())
-        .withDimensionsSpec(schema.getParser())
+        .withDimensionsSpec(schema.getDimensionsSpec())
         .withMetrics(schema.getAggregators())
         .withRollup(schema.getGranularitySpec().isRollup())
         .build();
@@ -378,7 +399,7 @@ public class Sink implements Iterable<FireHydrant>
             newIndex.loadDimensionIterable(dimOrder, oldCapabilities);
           }
         }
-        currHydrant = new FireHydrant(newIndex, newCount, getSegment().getIdentifier());
+        currHydrant = new FireHydrant(newIndex, newCount, getSegment().getId());
         if (old != null) {
           numRowsExcludingCurrIndex.addAndGet(old.getIndex().size());
         }
@@ -417,5 +438,43 @@ public class Sink implements Iterable<FireHydrant>
            "interval=" + interval +
            ", schema=" + schema +
            '}';
+  }
+
+  @Override
+  public boolean overshadows(Sink other)
+  {
+    // Sink is currently used in timeline only for querying stream data.
+    // In this case, sinks never overshadow each other.
+    return false;
+  }
+
+  @Override
+  public int getStartRootPartitionId()
+  {
+    return shardSpec.getStartRootPartitionId();
+  }
+
+  @Override
+  public int getEndRootPartitionId()
+  {
+    return shardSpec.getEndRootPartitionId();
+  }
+
+  @Override
+  public String getVersion()
+  {
+    return version;
+  }
+
+  @Override
+  public short getMinorVersion()
+  {
+    return shardSpec.getMinorVersion();
+  }
+
+  @Override
+  public short getAtomicUpdateGroupSize()
+  {
+    return shardSpec.getAtomicUpdateGroupSize();
   }
 }

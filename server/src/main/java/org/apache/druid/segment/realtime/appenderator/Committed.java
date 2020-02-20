@@ -46,13 +46,13 @@ public class Committed
   }
 
   public static Committed create(
-      Map<SegmentIdentifier, Integer> hydrants0,
+      Map<SegmentIdWithShardSpec, Integer> hydrants0,
       Object metadata
   )
   {
     final ImmutableMap.Builder<String, Integer> hydrants = ImmutableMap.builder();
-    for (Map.Entry<SegmentIdentifier, Integer> entry : hydrants0.entrySet()) {
-      hydrants.put(entry.getKey().getIdentifierAsString(), entry.getValue());
+    for (Map.Entry<SegmentIdWithShardSpec, Integer> entry : hydrants0.entrySet()) {
+      hydrants.put(entry.getKey().toString(), entry.getValue());
     }
     return new Committed(hydrants.build(), metadata);
   }
@@ -77,8 +77,7 @@ public class Committed
 
   public Committed without(final String identifierAsString)
   {
-    final Map<String, Integer> newHydrants = new HashMap<>();
-    newHydrants.putAll(hydrants);
+    final Map<String, Integer> newHydrants = new HashMap<>(hydrants);
     newHydrants.remove(identifierAsString);
     return new Committed(newHydrants, metadata);
   }

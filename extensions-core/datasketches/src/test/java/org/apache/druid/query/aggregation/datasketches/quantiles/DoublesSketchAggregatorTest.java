@@ -20,8 +20,7 @@
 package org.apache.druid.query.aggregation.datasketches.quantiles;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.druid.data.input.Row;
-import org.apache.druid.initialization.DruidModule;
+import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.guava.Sequence;
@@ -29,6 +28,8 @@ import org.apache.druid.query.aggregation.AggregationTestHelper;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.groupby.GroupByQueryConfig;
 import org.apache.druid.query.groupby.GroupByQueryRunnerTest;
+import org.apache.druid.query.groupby.ResultRow;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Rule;
@@ -44,7 +45,7 @@ import java.util.Collection;
 import java.util.List;
 
 @RunWith(Parameterized.class)
-public class DoublesSketchAggregatorTest
+public class DoublesSketchAggregatorTest extends InitializedNullHandlingTest
 {
 
   private final AggregationTestHelper helper;
@@ -55,8 +56,8 @@ public class DoublesSketchAggregatorTest
 
   public DoublesSketchAggregatorTest(final GroupByQueryConfig config)
   {
-    DruidModule module = new DoublesSketchModule();
-    module.configure(null);
+    DoublesSketchModule.registerSerde();
+    DoublesSketchModule module = new DoublesSketchModule();
     helper = AggregationTestHelper.createGroupByQueryAggregationTestHelper(
         module.getJacksonModules(), config, tempFolder);
     timeSeriesHelper = AggregationTestHelper.createTimeseriesQueryAggregationTestHelper(
@@ -116,7 +117,7 @@ public class DoublesSketchAggregatorTest
   @Test
   public void ingestingSketches() throws Exception
   {
-    Sequence<Row> seq = helper.createIndexAndRunQueryOnSegment(
+    Sequence<ResultRow> seq = helper.createIndexAndRunQueryOnSegment(
         new File(this.getClass().getClassLoader().getResource("quantiles/doubles_sketch_data.tsv").getFile()),
         String.join(
             "\n",
@@ -163,22 +164,22 @@ public class DoublesSketchAggregatorTest
             "}"
         )
     );
-    List<Row> results = seq.toList();
+    List<ResultRow> results = seq.toList();
     Assert.assertEquals(1, results.size());
-    Row row = results.get(0);
+    ResultRow row = results.get(0);
 
-    Object nonExistentSketchObject = row.getRaw("non_existent_sketch");
+    Object nonExistentSketchObject = row.get(1);
     Assert.assertTrue(nonExistentSketchObject instanceof Long);
     long nonExistentSketchValue = (long) nonExistentSketchObject;
     Assert.assertEquals(0, nonExistentSketchValue);
 
-    Object sketchObject = row.getRaw("sketch");
+    Object sketchObject = row.get(0);
     Assert.assertTrue(sketchObject instanceof Long);
     long sketchValue = (long) sketchObject;
     Assert.assertEquals(400, sketchValue);
 
     // post agg
-    Object quantilesObject = row.getRaw("quantiles");
+    Object quantilesObject = row.get(2);
     Assert.assertTrue(quantilesObject instanceof double[]);
     double[] quantiles = (double[]) quantilesObject;
     Assert.assertEquals(0, quantiles[0], 0.05); // min value
@@ -186,7 +187,7 @@ public class DoublesSketchAggregatorTest
     Assert.assertEquals(1, quantiles[2], 0.05); // max value
 
     // post agg
-    Object histogramObject = row.getRaw("histogram");
+    Object histogramObject = row.get(3);
     Assert.assertTrue(histogramObject instanceof double[]);
     double[] histogram = (double[]) histogramObject;
     for (final double bin : histogram) {
@@ -198,7 +199,7 @@ public class DoublesSketchAggregatorTest
   @Test
   public void buildingSketchesAtIngestionTime() throws Exception
   {
-    Sequence<Row> seq = helper.createIndexAndRunQueryOnSegment(
+    Sequence<ResultRow> seq = helper.createIndexAndRunQueryOnSegment(
         new File(this.getClass().getClassLoader().getResource("quantiles/doubles_build_data.tsv").getFile()),
         String.join(
             "\n",
@@ -212,11 +213,12 @@ public class DoublesSketchAggregatorTest
             "      \"dimensionExclusions\": [ \"sequenceNumber\"],",
             "      \"spatialDimensions\": []",
             "    },",
-            "    \"columns\": [\"timestamp\", \"sequenceNumber\", \"product\", \"value\"]",
+            "    \"columns\": [\"timestamp\", \"sequenceNumber\", \"product\", \"value\", \"valueWithNulls\"]",
             "  }",
             "}"
         ),
-        "[{\"type\": \"quantilesDoublesSketch\", \"name\": \"sketch\", \"fieldName\": \"value\", \"k\": 128}]",
+        "[{\"type\": \"quantilesDoublesSketch\", \"name\": \"sketch\", \"fieldName\": \"value\", \"k\": 128},"
+        + "{\"type\": \"quantilesDoublesSketch\", \"name\": \"sketchWithNulls\", \"fieldName\": \"valueWithNulls\", \"k\": 128}]",
         0, // minTimestamp
         Granularities.NONE,
         10, // maxRowCount
@@ -229,27 +231,35 @@ public class DoublesSketchAggregatorTest
             "  \"dimensions\": [],",
             "  \"aggregations\": [",
             "    {\"type\": \"quantilesDoublesSketch\", \"name\": \"sketch\", \"fieldName\": \"sketch\", \"k\": 128},",
+            "    {\"type\": \"quantilesDoublesSketch\", \"name\": \"sketchWithNulls\", \"fieldName\": \"sketchWithNulls\", \"k\": 128},",
             "    {\"type\": \"quantilesDoublesSketch\", \"name\": \"non_existent_sketch\", \"fieldName\": \"non_existent_sketch\", \"k\": 128}",
             "  ],",
             "  \"postAggregations\": [",
             "    {\"type\": \"quantilesDoublesSketchToQuantiles\", \"name\": \"quantiles\", \"fractions\": [0, 0.5, 1], \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketch\"}},",
-            "    {\"type\": \"quantilesDoublesSketchToHistogram\", \"name\": \"histogram\", \"splitPoints\": [0.25, 0.5, 0.75], \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketch\"}}",
+            "    {\"type\": \"quantilesDoublesSketchToHistogram\", \"name\": \"histogram\", \"splitPoints\": [0.25, 0.5, 0.75], \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketch\"}},",
+            "    {\"type\": \"quantilesDoublesSketchToQuantiles\", \"name\": \"quantilesWithNulls\", \"fractions\": [0, 0.5, 1], \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketchWithNulls\"}},",
+            "    {\"type\": \"quantilesDoublesSketchToHistogram\", \"name\": \"histogramWithNulls\", \"splitPoints\": [6.25, 7.5, 8.75], \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketchWithNulls\"}}",
             "  ],",
             "  \"intervals\": [\"2016-01-01T00:00:00.000Z/2016-01-31T00:00:00.000Z\"]",
             "}"
         )
     );
-    List<Row> results = seq.toList();
+    List<ResultRow> results = seq.toList();
     Assert.assertEquals(1, results.size());
-    Row row = results.get(0);
+    ResultRow row = results.get(0);
 
-    Object sketchObject = row.getRaw("sketch");
+    Object sketchObject = row.get(0);
     Assert.assertTrue(sketchObject instanceof Long);
     long sketchValue = (long) sketchObject;
     Assert.assertEquals(400, sketchValue);
 
+    Object sketchObjectWithNulls = row.get(1);
+    Assert.assertTrue(sketchObjectWithNulls instanceof Long);
+    long sketchValueWithNulls = (long) sketchObjectWithNulls;
+    Assert.assertEquals(377, sketchValueWithNulls);
+
     // post agg
-    Object quantilesObject = row.getRaw("quantiles");
+    Object quantilesObject = row.get(3);
     Assert.assertTrue(quantilesObject instanceof double[]);
     double[] quantiles = (double[]) quantilesObject;
     Assert.assertEquals(0, quantiles[0], 0.05); // min value
@@ -257,19 +267,144 @@ public class DoublesSketchAggregatorTest
     Assert.assertEquals(1, quantiles[2], 0.05); // max value
 
     // post agg
-    Object histogramObject = row.getRaw("histogram");
+    Object histogramObject = row.get(4);
     Assert.assertTrue(histogramObject instanceof double[]);
     double[] histogram = (double[]) histogramObject;
     Assert.assertEquals(4, histogram.length);
     for (final double bin : histogram) {
       Assert.assertEquals(100, bin, 100 * 0.2); // 400 items uniformly distributed into 4 bins
     }
+
+    // post agg with nulls
+    Object quantilesObjectWithNulls = row.get(5);
+    Assert.assertTrue(quantilesObjectWithNulls instanceof double[]);
+    double[] quantilesWithNulls = (double[]) quantilesObjectWithNulls;
+    Assert.assertEquals(5.0, quantilesWithNulls[0], 0.05); // min value
+    Assert.assertEquals(7.55, quantilesWithNulls[1], 0.05); // median value
+    Assert.assertEquals(10.0, quantilesWithNulls[2], 0.05); // max value
+
+    // post agg with nulls
+    Object histogramObjectWithNulls = row.get(6);
+    Assert.assertTrue(histogramObjectWithNulls instanceof double[]);
+    double[] histogramWithNulls = (double[]) histogramObjectWithNulls;
+    Assert.assertEquals(4, histogramWithNulls.length);
+    for (final double bin : histogramWithNulls) {
+      Assert.assertEquals(100, bin, 50); // distribution is skewed due to nulls
+    }
   }
 
   @Test
   public void buildingSketchesAtQueryTime() throws Exception
   {
-    Sequence<Row> seq = helper.createIndexAndRunQueryOnSegment(
+    Sequence<ResultRow> seq = helper.createIndexAndRunQueryOnSegment(
+        new File(this.getClass().getClassLoader().getResource("quantiles/doubles_build_data.tsv").getFile()),
+        String.join(
+            "\n",
+            "{",
+            "  \"type\": \"string\",",
+            "  \"parseSpec\": {",
+            "    \"format\": \"tsv\",",
+            "    \"timestampSpec\": {\"column\": \"timestamp\", \"format\": \"yyyyMMddHH\"},",
+            "    \"dimensionsSpec\": {",
+            "      \"dimensions\": [\"sequenceNumber\", \"product\"],",
+            "      \"dimensionExclusions\": [],",
+            "      \"spatialDimensions\": []",
+            "    },",
+            "    \"columns\": [\"timestamp\", \"sequenceNumber\", \"product\", \"value\", \"valueWithNulls\"]",
+            "  }",
+            "}"
+        ),
+        "[{\"type\": \"doubleSum\", \"name\": \"value\", \"fieldName\": \"value\"},"
+        + "{\"type\": \"doubleSum\", \"name\": \"valueWithNulls\", \"fieldName\": \"valueWithNulls\"}]",
+        0, // minTimestamp
+        Granularities.NONE,
+        10, // maxRowCount
+        String.join(
+            "\n",
+            "{",
+            "  \"queryType\": \"groupBy\",",
+            "  \"dataSource\": \"test_datasource\",",
+            "  \"granularity\": \"ALL\",",
+            "  \"dimensions\": [],",
+            "  \"aggregations\": [",
+            "    {\"type\": \"quantilesDoublesSketch\", \"name\": \"sketch\", \"fieldName\": \"value\", \"k\": 128},",
+            "    {\"type\": \"quantilesDoublesSketch\", \"name\": \"sketchWithNulls\", \"fieldName\": \"valueWithNulls\", \"k\": 128}",
+            "  ],",
+            "  \"postAggregations\": [",
+            "    {\"type\": \"quantilesDoublesSketchToQuantile\", \"name\": \"quantile\", \"fraction\": 0.5, \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketch\"}},",
+            "    {\"type\": \"quantilesDoublesSketchToQuantiles\", \"name\": \"quantiles\", \"fractions\": [0, 0.5, 1], \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketch\"}},",
+            "    {\"type\": \"quantilesDoublesSketchToHistogram\", \"name\": \"histogram\", \"splitPoints\": [0.25, 0.5, 0.75], \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketch\"}},",
+            "    {\"type\": \"quantilesDoublesSketchToQuantile\", \"name\": \"quantileWithNulls\", \"fraction\": 0.5, \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketchWithNulls\"}},",
+            "    {\"type\": \"quantilesDoublesSketchToQuantiles\", \"name\": \"quantilesWithNulls\", \"fractions\": [0, 0.5, 1], \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketchWithNulls\"}},",
+            "    {\"type\": \"quantilesDoublesSketchToHistogram\", \"name\": \"histogramWithNulls\", \"splitPoints\": [6.25, 7.5, 8.75], \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketchWithNulls\"}}",
+            "  ],",
+            "  \"intervals\": [\"2016-01-01T00:00:00.000Z/2016-01-31T00:00:00.000Z\"]",
+            "}"
+        )
+    );
+    List<ResultRow> results = seq.toList();
+    Assert.assertEquals(1, results.size());
+    ResultRow row = results.get(0);
+
+    Object sketchObject = row.get(0);
+    Assert.assertTrue(sketchObject instanceof Long);
+    long sketchValue = (long) sketchObject;
+    Assert.assertEquals(400, sketchValue);
+
+    Object sketchObjectWithNulls = row.get(1);
+    Assert.assertTrue(sketchObjectWithNulls instanceof Long);
+    long sketchValueWithNulls = (long) sketchObjectWithNulls;
+    Assert.assertEquals(NullHandling.replaceWithDefault() ? 400 : 377, sketchValueWithNulls);
+
+    // post agg
+    Object quantileObject = row.get(2);
+    Assert.assertTrue(quantileObject instanceof Double);
+    Assert.assertEquals(0.5, (double) quantileObject, 0.05); // median value
+
+    // post agg
+    Object quantilesObject = row.get(3);
+    Assert.assertTrue(quantilesObject instanceof double[]);
+    double[] quantiles = (double[]) quantilesObject;
+    Assert.assertEquals(0, quantiles[0], 0.05); // min value
+    Assert.assertEquals(0.5, quantiles[1], 0.05); // median value
+    Assert.assertEquals(1, quantiles[2], 0.05); // max value
+
+    // post agg
+    Object histogramObject = row.get(4);
+    Assert.assertTrue(histogramObject instanceof double[]);
+    double[] histogram = (double[]) histogramObject;
+    for (final double bin : histogram) {
+      Assert.assertEquals(100, bin, 100 * 0.2); // 400 items uniformly
+      // distributed into 4 bins
+    }
+
+    // post agg with nulls
+    Object quantileObjectWithNulls = row.get(5);
+    Assert.assertTrue(quantileObjectWithNulls instanceof Double);
+    Assert.assertEquals(NullHandling.replaceWithDefault() ? 7.4 : 7.5, (double) quantileObjectWithNulls, 0.1); // median value
+
+    // post agg with nulls
+    Object quantilesObjectWithNulls = row.get(6);
+    Assert.assertTrue(quantilesObjectWithNulls instanceof double[]);
+    double[] quantilesWithNulls = (double[]) quantilesObjectWithNulls;
+    Assert.assertEquals(NullHandling.replaceWithDefault() ? 0.0 : 5.0, quantilesWithNulls[0], 0.05); // min value
+    Assert.assertEquals(NullHandling.replaceWithDefault() ? 7.4 : 7.5, quantilesWithNulls[1], 0.1); // median value
+    Assert.assertEquals(10.0, quantilesWithNulls[2], 0.05); // max value
+
+    // post agg with nulls
+    Object histogramObjectWithNulls = row.get(7);
+    Assert.assertTrue(histogramObjectWithNulls instanceof double[]);
+    double[] histogramWithNulls = (double[]) histogramObjectWithNulls;
+    for (final double bin : histogramWithNulls) {
+      Assert.assertEquals(100, bin, 80); // distribution is skewed due to nulls/0s
+      // distributed into 4 bins
+    }
+  }
+
+  @Test
+  public void queryingDataWithFieldNameValueAsFloatInsteadOfSketch() throws Exception
+  {
+    Sequence<ResultRow> seq = helper.createIndexAndRunQueryOnSegment(
         new File(this.getClass().getClassLoader().getResource("quantiles/doubles_build_data.tsv").getFile()),
         String.join(
             "\n",
@@ -310,22 +445,22 @@ public class DoublesSketchAggregatorTest
             "}"
         )
     );
-    List<Row> results = seq.toList();
+    List<ResultRow> results = seq.toList();
     Assert.assertEquals(1, results.size());
-    Row row = results.get(0);
+    ResultRow row = results.get(0);
 
-    Object sketchObject = row.getRaw("sketch");
+    Object sketchObject = row.get(0);
     Assert.assertTrue(sketchObject instanceof Long);
     long sketchValue = (long) sketchObject;
     Assert.assertEquals(400, sketchValue);
 
     // post agg
-    Object quantileObject = row.getRaw("quantile");
+    Object quantileObject = row.get(1);
     Assert.assertTrue(quantileObject instanceof Double);
     Assert.assertEquals(0.5, (double) quantileObject, 0.05); // median value
 
     // post agg
-    Object quantilesObject = row.getRaw("quantiles");
+    Object quantilesObject = row.get(2);
     Assert.assertTrue(quantilesObject instanceof double[]);
     double[] quantiles = (double[]) quantilesObject;
     Assert.assertEquals(0, quantiles[0], 0.05); // min value
@@ -333,7 +468,7 @@ public class DoublesSketchAggregatorTest
     Assert.assertEquals(1, quantiles[2], 0.05); // max value
 
     // post agg
-    Object histogramObject = row.getRaw("histogram");
+    Object histogramObject = row.get(3);
     Assert.assertTrue(histogramObject instanceof double[]);
     double[] histogram = (double[]) histogramObject;
     for (final double bin : histogram) {
@@ -343,85 +478,9 @@ public class DoublesSketchAggregatorTest
   }
 
   @Test
-  public void QueryingDataWithFieldNameValueAsFloatInsteadOfSketch() throws Exception
+  public void timeSeriesQueryInputAsFloat() throws Exception
   {
-    Sequence<Row> seq = helper.createIndexAndRunQueryOnSegment(
-        new File(this.getClass().getClassLoader().getResource("quantiles/doubles_build_data.tsv").getFile()),
-        String.join(
-            "\n",
-            "{",
-            "  \"type\": \"string\",",
-            "  \"parseSpec\": {",
-            "    \"format\": \"tsv\",",
-            "    \"timestampSpec\": {\"column\": \"timestamp\", \"format\": \"yyyyMMddHH\"},",
-            "    \"dimensionsSpec\": {",
-            "      \"dimensions\": [\"sequenceNumber\", \"product\"],",
-            "      \"dimensionExclusions\": [],",
-            "      \"spatialDimensions\": []",
-            "    },",
-            "    \"columns\": [\"timestamp\", \"sequenceNumber\", \"product\", \"value\"]",
-            "  }",
-            "}"
-        ),
-        "[{\"type\": \"doubleSum\", \"name\": \"value\", \"fieldName\": \"value\"}]",
-        0, // minTimestamp
-        Granularities.NONE,
-        10, // maxRowCount
-        String.join(
-            "\n",
-            "{",
-            "  \"queryType\": \"groupBy\",",
-            "  \"dataSource\": \"test_datasource\",",
-            "  \"granularity\": \"ALL\",",
-            "  \"dimensions\": [],",
-            "  \"aggregations\": [",
-            "    {\"type\": \"quantilesDoublesSketch\", \"name\": \"sketch\", \"fieldName\": \"value\", \"k\": 128}",
-            "  ],",
-            "  \"postAggregations\": [",
-            "    {\"type\": \"quantilesDoublesSketchToQuantile\", \"name\": \"quantile\", \"fraction\": 0.5, \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketch\"}},",
-            "    {\"type\": \"quantilesDoublesSketchToQuantiles\", \"name\": \"quantiles\", \"fractions\": [0, 0.5, 1], \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketch\"}},",
-            "    {\"type\": \"quantilesDoublesSketchToHistogram\", \"name\": \"histogram\", \"splitPoints\": [0.25, 0.5, 0.75], \"field\": {\"type\": \"fieldAccess\", \"fieldName\": \"sketch\"}}",
-            "  ],",
-            "  \"intervals\": [\"2016-01-01T00:00:00.000Z/2016-01-31T00:00:00.000Z\"]",
-            "}"
-        )
-    );
-    List<Row> results = seq.toList();
-    Assert.assertEquals(1, results.size());
-    Row row = results.get(0);
-
-    Object sketchObject = row.getRaw("sketch");
-    Assert.assertTrue(sketchObject instanceof Long);
-    long sketchValue = (long) sketchObject;
-    Assert.assertEquals(400, sketchValue);
-
-    // post agg
-    Object quantileObject = row.getRaw("quantile");
-    Assert.assertTrue(quantileObject instanceof Double);
-    Assert.assertEquals(0.5, (double) quantileObject, 0.05); // median value
-
-    // post agg
-    Object quantilesObject = row.getRaw("quantiles");
-    Assert.assertTrue(quantilesObject instanceof double[]);
-    double[] quantiles = (double[]) quantilesObject;
-    Assert.assertEquals(0, quantiles[0], 0.05); // min value
-    Assert.assertEquals(0.5, quantiles[1], 0.05); // median value
-    Assert.assertEquals(1, quantiles[2], 0.05); // max value
-
-    // post agg
-    Object histogramObject = row.getRaw("histogram");
-    Assert.assertTrue(histogramObject instanceof double[]);
-    double[] histogram = (double[]) histogramObject;
-    for (final double bin : histogram) {
-      Assert.assertEquals(100, bin, 100 * 0.2); // 400 items uniformly
-      // distributed into 4 bins
-    }
-  }
-
-  @Test
-  public void TimeSeriesQueryInputAsFloat() throws Exception
-  {
-    Sequence<Row> seq = timeSeriesHelper.createIndexAndRunQueryOnSegment(
+    Sequence<ResultRow> seq = timeSeriesHelper.createIndexAndRunQueryOnSegment(
         new File(this.getClass().getClassLoader().getResource("quantiles/doubles_build_data.tsv").getFile()),
         String.join(
             "\n",
@@ -461,7 +520,7 @@ public class DoublesSketchAggregatorTest
             "}"
         )
     );
-    List<Row> results = seq.toList();
+    List<ResultRow> results = seq.toList();
     Assert.assertEquals(1, results.size());
   }
 }

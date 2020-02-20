@@ -20,15 +20,16 @@
 package org.apache.druid.data.input.impl;
 
 import com.google.common.base.Preconditions;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.io.LineIterator;
 import org.apache.druid.data.input.FiniteFirehoseFactory;
 import org.apache.druid.data.input.Firehose;
 import org.apache.druid.data.input.InputSplit;
+import org.apache.druid.data.input.SplitHintSpec;
 import org.apache.druid.java.util.common.logger.Logger;
 
+import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -77,12 +78,8 @@ public abstract class AbstractTextFilesFirehoseFactory<T>
               return IOUtils.lineIterator(wrapObjectStream(object, openObjectStream(object)), StandardCharsets.UTF_8);
             }
             catch (Exception e) {
-              LOG.error(
-                  e,
-                  "Exception reading object[%s]",
-                  object
-              );
-              throw Throwables.propagate(e);
+              LOG.error(e, "Exception reading object[%s]", object);
+              throw new RuntimeException(e);
             }
           }
         },
@@ -103,14 +100,14 @@ public abstract class AbstractTextFilesFirehoseFactory<T>
   }
 
   @Override
-  public Stream<InputSplit<T>> getSplits() throws IOException
+  public Stream<InputSplit<T>> getSplits(@Nullable SplitHintSpec splitHintSpec) throws IOException
   {
     initializeObjectsIfNeeded();
     return getObjects().stream().map(InputSplit::new);
   }
 
   @Override
-  public int getNumSplits() throws IOException
+  public int getNumSplits(@Nullable SplitHintSpec splitHintSpec) throws IOException
   {
     initializeObjectsIfNeeded();
     return getObjects().size();

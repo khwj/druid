@@ -25,11 +25,10 @@ import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
 import com.google.common.base.Predicate;
 import com.google.common.base.Strings;
-import com.google.common.base.Throwables;
 import com.google.common.io.ByteSource;
 import com.google.common.io.Files;
 import com.google.inject.Inject;
-import org.apache.druid.java.util.common.CompressionUtils;
+import org.apache.druid.data.input.impl.CloudObjectLocation;
 import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.IOE;
@@ -40,6 +39,7 @@ import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.segment.loading.SegmentLoadingException;
 import org.apache.druid.segment.loading.URIDataPuller;
+import org.apache.druid.utils.CompressionUtils;
 
 import javax.tools.FileObject;
 import java.io.File;
@@ -56,13 +56,9 @@ import java.net.URI;
  */
 public class S3DataSegmentPuller implements URIDataPuller
 {
-  public static final int DEFAULT_RETRY_COUNT = 3;
-
-  public static final String scheme = S3StorageDruidModule.SCHEME;
-
   private static final Logger log = new Logger(S3DataSegmentPuller.class);
 
-  protected static final String BUCKET = "bucket";
+  static final String BUCKET = "bucket";
   protected static final String KEY = "key";
 
   protected final ServerSideEncryptingAmazonS3 s3Client;
@@ -73,7 +69,7 @@ public class S3DataSegmentPuller implements URIDataPuller
     this.s3Client = s3Client;
   }
 
-  FileUtils.FileCopyResult getSegmentFiles(final S3Coords s3Coords, final File outDir) throws SegmentLoadingException
+  FileUtils.FileCopyResult getSegmentFiles(final CloudObjectLocation s3Coords, final File outDir) throws SegmentLoadingException
   {
 
     log.info("Pulling index at path[%s] to outDir[%s]", s3Coords, outDir);
@@ -85,7 +81,7 @@ public class S3DataSegmentPuller implements URIDataPuller
     try {
       org.apache.commons.io.FileUtils.forceMkdir(outDir);
 
-      final URI uri = URI.create(StringUtils.format("s3://%s/%s", s3Coords.bucket, s3Coords.path));
+      final URI uri = s3Coords.toUri(S3StorageDruidModule.SCHEME);
       final ByteSource byteSource = new ByteSource()
       {
         @Override
@@ -100,11 +96,11 @@ public class S3DataSegmentPuller implements URIDataPuller
                 throw new IOException("Recoverable exception", e);
               }
             }
-            throw Throwables.propagate(e);
+            throw new RuntimeException(e);
           }
         }
       };
-      if (CompressionUtils.isZip(s3Coords.path)) {
+      if (CompressionUtils.isZip(s3Coords.getPath())) {
         final FileUtils.FileCopyResult result = CompressionUtils.unzip(
             byteSource,
             outDir,
@@ -114,7 +110,7 @@ public class S3DataSegmentPuller implements URIDataPuller
         log.info("Loaded %d bytes from [%s] to [%s]", result.size(), s3Coords.toString(), outDir.getAbsolutePath());
         return result;
       }
-      if (CompressionUtils.isGz(s3Coords.path)) {
+      if (CompressionUtils.isGz(s3Coords.getPath())) {
         final String fname = Files.getNameWithoutExtension(uri.getPath());
         final File outFile = new File(outDir, fname);
 
@@ -126,7 +122,7 @@ public class S3DataSegmentPuller implements URIDataPuller
     }
     catch (Exception e) {
       try {
-        org.apache.commons.io.FileUtils.deleteDirectory(outDir);
+        FileUtils.deleteDirectory(outDir);
       }
       catch (IOException ioe) {
         log.warn(
@@ -138,16 +134,6 @@ public class S3DataSegmentPuller implements URIDataPuller
       }
       throw new SegmentLoadingException(e, e.getMessage());
     }
-  }
-
-  public static URI checkURI(URI uri)
-  {
-    if (uri.getScheme().equalsIgnoreCase(scheme)) {
-      uri = URI.create("s3" + uri.toString().substring(scheme.length()));
-    } else if (!"s3".equalsIgnoreCase(uri.getScheme())) {
-      throw new IAE("Don't know how to load scheme for URI [%s]", uri.toString());
-    }
-    return uri;
   }
 
   @Override
@@ -163,8 +149,9 @@ public class S3DataSegmentPuller implements URIDataPuller
 
   private FileObject buildFileObject(final URI uri) throws AmazonServiceException
   {
-    final S3Coords coords = new S3Coords(checkURI(uri));
-    final S3ObjectSummary objectSummary = S3Utils.getSingleObjectSummary(s3Client, coords.bucket, coords.path);
+    final CloudObjectLocation coords = new CloudObjectLocation(S3Utils.checkURI(uri));
+    final S3ObjectSummary objectSummary =
+        S3Utils.getSingleObjectSummary(s3Client, coords.getBucket(), coords.getPath());
     final String path = uri.getPath();
 
     return new FileObject()
@@ -290,8 +277,9 @@ public class S3DataSegmentPuller implements URIDataPuller
   public String getVersion(URI uri) throws IOException
   {
     try {
-      final S3Coords coords = new S3Coords(checkURI(uri));
-      final S3ObjectSummary objectSummary = S3Utils.getSingleObjectSummary(s3Client, coords.bucket, coords.path);
+      final CloudObjectLocation coords = new CloudObjectLocation(S3Utils.checkURI(uri));
+      final S3ObjectSummary objectSummary =
+          S3Utils.getSingleObjectSummary(s3Client, coords.getBucket(), coords.getPath());
       return StringUtils.format("%d", objectSummary.getLastModified().getTime());
     }
     catch (AmazonServiceException e) {
@@ -304,49 +292,18 @@ public class S3DataSegmentPuller implements URIDataPuller
     }
   }
 
-  private boolean isObjectInBucket(final S3Coords coords) throws SegmentLoadingException
+  private boolean isObjectInBucket(final CloudObjectLocation coords) throws SegmentLoadingException
   {
     try {
       return S3Utils.retryS3Operation(
-          () -> S3Utils.isObjectInBucketIgnoringPermission(s3Client, coords.bucket, coords.path)
+          () -> S3Utils.isObjectInBucketIgnoringPermission(s3Client, coords.getBucket(), coords.getPath())
       );
     }
     catch (AmazonS3Exception | IOException e) {
       throw new SegmentLoadingException(e, "S3 fail! Key[%s]", coords);
     }
     catch (Exception e) {
-      throw Throwables.propagate(e);
-    }
-  }
-
-  protected static class S3Coords
-  {
-    String bucket;
-    String path;
-
-    public S3Coords(URI uri)
-    {
-      if (!"s3".equalsIgnoreCase(uri.getScheme())) {
-        throw new IAE("Unsupported scheme: [%s]", uri.getScheme());
-      }
-      bucket = uri.getHost();
-      String path = uri.getPath();
-      if (path.startsWith("/")) {
-        path = path.substring(1);
-      }
-      this.path = path;
-    }
-
-    public S3Coords(String bucket, String key)
-    {
-      this.bucket = bucket;
-      this.path = key;
-    }
-
-    @Override
-    public String toString()
-    {
-      return StringUtils.format("s3://%s/%s", bucket, path);
+      throw new RuntimeException(e);
     }
   }
 }

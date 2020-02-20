@@ -27,9 +27,15 @@ import java.io.IOException;
  */
 public interface RequestLogger
 {
-  void log(RequestLogLine requestLogLine) throws IOException;
+  void logNativeQuery(RequestLogLine requestLogLine) throws IOException;
 
-  default void start() throws Exception {}
+  void logSqlQuery(RequestLogLine requestLogLine) throws IOException;
 
-  default void stop() {}
+  default void start() throws Exception
+  {
+  }
+
+  default void stop()
+  {
+  }
 }

@@ -32,6 +32,7 @@ import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.QueryInterruptedException;
+import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.query.filter.Filter;
 import org.apache.druid.segment.BaseObjectColumnValueSelector;
 import org.apache.druid.segment.Segment;
@@ -39,6 +40,7 @@ import org.apache.druid.segment.StorageAdapter;
 import org.apache.druid.segment.VirtualColumn;
 import org.apache.druid.segment.column.ColumnHolder;
 import org.apache.druid.segment.filter.Filters;
+import org.apache.druid.timeline.SegmentId;
 import org.joda.time.Interval;
 
 import java.util.ArrayList;
@@ -54,25 +56,26 @@ import java.util.concurrent.TimeoutException;
 
 public class ScanQueryEngine
 {
-  private static final String LEGACY_TIMESTAMP_KEY = "timestamp";
+  static final String LEGACY_TIMESTAMP_KEY = "timestamp";
 
   public Sequence<ScanResultValue> process(
       final ScanQuery query,
       final Segment segment,
-      final Map<String, Object> responseContext
+      final ResponseContext responseContext
   )
   {
     // "legacy" should be non-null due to toolChest.mergeResults
     final boolean legacy = Preconditions.checkNotNull(query.isLegacy(), "WTF?! Expected non-null legacy");
 
-    if (responseContext.get(ScanQueryRunnerFactory.CTX_COUNT) != null) {
-      long count = (long) responseContext.get(ScanQueryRunnerFactory.CTX_COUNT);
-      if (count >= query.getLimit()) {
+    final Object numScannedRows = responseContext.get(ResponseContext.Key.NUM_SCANNED_ROWS);
+    if (numScannedRows != null) {
+      long count = (long) numScannedRows;
+      if (count >= query.getScanRowsLimit() && query.getOrder().equals(ScanQuery.Order.NONE)) {
         return Sequences.empty();
       }
     }
     final boolean hasTimeout = QueryContexts.hasTimeout(query);
-    final long timeoutAt = (long) responseContext.get(ScanQueryRunnerFactory.CTX_TIMEOUT_AT);
+    final long timeoutAt = (long) responseContext.get(ResponseContext.Key.TIMEOUT_AT);
     final long start = System.currentTimeMillis();
     final StorageAdapter adapter = segment.asStorageAdapter();
 
@@ -115,14 +118,12 @@ public class ScanQueryEngine
     final List<Interval> intervals = query.getQuerySegmentSpec().getIntervals();
     Preconditions.checkArgument(intervals.size() == 1, "Can only handle a single interval, got[%s]", intervals);
 
-    final String segmentId = segment.getIdentifier();
+    final SegmentId segmentId = segment.getId();
 
     final Filter filter = Filters.convertToCNFFromQueryContext(query, Filters.toFilter(query.getFilter()));
 
-    if (responseContext.get(ScanQueryRunnerFactory.CTX_COUNT) == null) {
-      responseContext.put(ScanQueryRunnerFactory.CTX_COUNT, 0L);
-    }
-    final long limit = query.getLimit() - (long) responseContext.get(ScanQueryRunnerFactory.CTX_COUNT);
+    responseContext.add(ResponseContext.Key.NUM_SCANNED_ROWS, 0L);
+    final long limit = calculateRemainingScanRowsLimit(query, responseContext);
     return Sequences.concat(
             adapter
                 .makeCursors(
@@ -130,7 +131,8 @@ public class ScanQueryEngine
                     intervals.get(0),
                     query.getVirtualColumns(),
                     Granularities.ALL,
-                    query.isDescending(),
+                    query.getOrder().equals(ScanQuery.Order.DESCENDING) ||
+                    (query.getOrder().equals(ScanQuery.Order.NONE) && query.isDescending()),
                     null
                 )
                 .map(cursor -> new BaseSequence<>(
@@ -176,25 +178,22 @@ public class ScanQueryEngine
                             }
                             final long lastOffset = offset;
                             final Object events;
-                            final String resultFormat = query.getResultFormat();
-                            if (ScanQuery.RESULT_FORMAT_COMPACTED_LIST.equals(resultFormat)) {
+                            final ScanQuery.ResultFormat resultFormat = query.getResultFormat();
+                            if (ScanQuery.ResultFormat.RESULT_FORMAT_COMPACTED_LIST.equals(resultFormat)) {
                               events = rowsToCompactedList();
-                            } else if (ScanQuery.RESULT_FORMAT_LIST.equals(resultFormat)) {
+                            } else if (ScanQuery.ResultFormat.RESULT_FORMAT_LIST.equals(resultFormat)) {
                               events = rowsToList();
                             } else {
-                              throw new UOE("resultFormat[%s] is not supported", resultFormat);
+                              throw new UOE("resultFormat[%s] is not supported", resultFormat.toString());
                             }
-                            responseContext.put(
-                                ScanQueryRunnerFactory.CTX_COUNT,
-                                (long) responseContext.get(ScanQueryRunnerFactory.CTX_COUNT) + (offset - lastOffset)
-                            );
+                            responseContext.add(ResponseContext.Key.NUM_SCANNED_ROWS, offset - lastOffset);
                             if (hasTimeout) {
                               responseContext.put(
-                                  ScanQueryRunnerFactory.CTX_TIMEOUT_AT,
+                                  ResponseContext.Key.TIMEOUT_AT,
                                   timeoutAt - (System.currentTimeMillis() - start)
                               );
                             }
-                            return new ScanResultValue(segmentId, allColumns, events);
+                            return new ScanResultValue(segmentId.toString(), allColumns, events);
                           }
 
                           @Override
@@ -203,9 +202,9 @@ public class ScanQueryEngine
                             throw new UnsupportedOperationException();
                           }
 
-                          private List<Object> rowsToCompactedList()
+                          private List<List<Object>> rowsToCompactedList()
                           {
-                            final List<Object> events = new ArrayList<>(batchSize);
+                            final List<List<Object>> events = new ArrayList<>(batchSize);
                             final long iterLimit = Math.min(limit, offset + batchSize);
                             for (; !cursor.isDone() && offset < iterLimit; cursor.advance(), offset++) {
                               final List<Object> theEvent = new ArrayList<>(allColumns.size());
@@ -254,5 +253,17 @@ public class ScanQueryEngine
                     }
             ))
     );
+  }
+
+  /**
+   * If we're performing time-ordering, we want to scan through the first `limit` rows in each segment ignoring the number
+   * of rows already counted on other segments.
+   */
+  private long calculateRemainingScanRowsLimit(ScanQuery query, ResponseContext responseContext)
+  {
+    if (query.getOrder().equals(ScanQuery.Order.NONE)) {
+      return query.getScanRowsLimit() - (long) responseContext.get(ResponseContext.Key.NUM_SCANNED_ROWS);
+    }
+    return query.getScanRowsLimit();
   }
 }

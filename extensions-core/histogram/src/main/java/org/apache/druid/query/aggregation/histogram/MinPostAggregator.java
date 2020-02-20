@@ -23,6 +23,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonTypeName;
 import com.google.common.collect.Sets;
+import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.PostAggregator;
 import org.apache.druid.query.aggregation.post.PostAggregatorIds;
@@ -35,14 +36,8 @@ import java.util.Set;
 @JsonTypeName("min")
 public class MinPostAggregator extends ApproximateHistogramPostAggregator
 {
-  static final Comparator COMPARATOR = new Comparator()
-  {
-    @Override
-    public int compare(Object o, Object o1)
-    {
-      return Double.compare(((Number) o).doubleValue(), ((Number) o1).doubleValue());
-    }
-  };
+  // this doesn't need to handle nulls because the values come from ApproximateHistogram
+  static final Comparator COMPARATOR = Comparator.comparingDouble(o -> ((Number) o).doubleValue());
 
   @JsonCreator
   public MinPostAggregator(
@@ -68,8 +63,15 @@ public class MinPostAggregator extends ApproximateHistogramPostAggregator
   @Override
   public Object compute(Map<String, Object> values)
   {
-    final ApproximateHistogram ah = (ApproximateHistogram) values.get(fieldName);
-    return ah.getMin();
+    Object val = values.get(fieldName);
+    if (val instanceof ApproximateHistogram) {
+      final ApproximateHistogram ah = (ApproximateHistogram) val;
+      return ah.getMin();
+    } else if (val instanceof FixedBucketsHistogram) {
+      final FixedBucketsHistogram fbh = (FixedBucketsHistogram) val;
+      return fbh.getMin();
+    }
+    throw new ISE("Unknown value type: " + val.getClass());
   }
 
   @Override

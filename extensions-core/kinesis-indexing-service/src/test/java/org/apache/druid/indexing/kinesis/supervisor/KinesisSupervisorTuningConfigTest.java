@@ -59,7 +59,7 @@ public class KinesisSupervisorTuningConfigTest
 
     Assert.assertNotNull(config.getBasePersistDirectory());
     Assert.assertEquals(1000000, config.getMaxRowsInMemory());
-    Assert.assertEquals(5_000_000, config.getMaxRowsPerSegment());
+    Assert.assertEquals(5_000_000, config.getMaxRowsPerSegment().intValue());
     Assert.assertEquals(new Period("PT10M"), config.getIntermediatePersistPeriod());
     Assert.assertEquals(0, config.getMaxPendingPersists());
     Assert.assertEquals(new IndexSpec(), config.getIndexSpec());
@@ -71,6 +71,7 @@ public class KinesisSupervisorTuningConfigTest
     Assert.assertEquals(8L, (long) config.getChatRetries());
     Assert.assertEquals(Duration.standardSeconds(10), config.getHttpTimeout());
     Assert.assertEquals(Duration.standardSeconds(80), config.getShutdownTimeout());
+    Assert.assertEquals(Duration.standardSeconds(120), config.getRepartitionTransitionDuration());
   }
 
   @Test
@@ -90,7 +91,8 @@ public class KinesisSupervisorTuningConfigTest
                      + "  \"chatThreads\": 13,\n"
                      + "  \"chatRetries\": 14,\n"
                      + "  \"httpTimeout\": \"PT15S\",\n"
-                     + "  \"shutdownTimeout\": \"PT95S\"\n"
+                     + "  \"shutdownTimeout\": \"PT95S\",\n"
+                     + "  \"repartitionTransitionDuration\": \"PT500S\"\n"
                      + "}";
 
     KinesisSupervisorTuningConfig config = (KinesisSupervisorTuningConfig) mapper.readValue(
@@ -105,7 +107,7 @@ public class KinesisSupervisorTuningConfigTest
 
     Assert.assertEquals(new File("/tmp/xxx"), config.getBasePersistDirectory());
     Assert.assertEquals(100, config.getMaxRowsInMemory());
-    Assert.assertEquals(100, config.getMaxRowsPerSegment());
+    Assert.assertEquals(100, config.getMaxRowsPerSegment().intValue());
     Assert.assertEquals(new Period("PT1H"), config.getIntermediatePersistPeriod());
     Assert.assertEquals(100, config.getMaxPendingPersists());
     Assert.assertEquals(true, config.getBuildV9Directly());
@@ -116,5 +118,6 @@ public class KinesisSupervisorTuningConfigTest
     Assert.assertEquals(14L, (long) config.getChatRetries());
     Assert.assertEquals(Duration.standardSeconds(15), config.getHttpTimeout());
     Assert.assertEquals(Duration.standardSeconds(95), config.getShutdownTimeout());
+    Assert.assertEquals(Duration.standardSeconds(500), config.getRepartitionTransitionDuration());
   }
 }

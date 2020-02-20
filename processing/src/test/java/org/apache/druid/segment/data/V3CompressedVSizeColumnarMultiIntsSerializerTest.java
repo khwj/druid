@@ -23,6 +23,7 @@ import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import org.apache.commons.io.IOUtils;
+import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.guava.CloseQuietly;
 import org.apache.druid.java.util.common.io.smoosh.FileSmoosher;
@@ -32,6 +33,7 @@ import org.apache.druid.java.util.common.io.smoosh.SmooshedWriter;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMedium;
 import org.apache.druid.segment.writeout.SegmentWriteOutMedium;
 import org.apache.druid.segment.writeout.WriteOutBytes;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -42,15 +44,12 @@ import org.junit.runners.Parameterized;
 import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Random;
 import java.util.Set;
 import java.util.stream.IntStream;
-
-import static org.junit.Assert.assertEquals;
 
 @RunWith(Parameterized.class)
 public class V3CompressedVSizeColumnarMultiIntsSerializerTest
@@ -147,7 +146,7 @@ public class V3CompressedVSizeColumnarMultiIntsSerializerTest
       writer.writeTo(writeOutBytes, smoosher);
       smoosher.close();
 
-      assertEquals(writtenLength, supplierFromIterable.getSerializedSize());
+      Assert.assertEquals(writtenLength, supplierFromIterable.getSerializedSize());
 
       // read from ByteBuffer and check values
       V3CompressedVSizeColumnarMultiIntsSupplier supplierFromByteBuffer = V3CompressedVSizeColumnarMultiIntsSupplier.fromByteBuffer(
@@ -156,19 +155,19 @@ public class V3CompressedVSizeColumnarMultiIntsSerializerTest
       );
 
       try (final ColumnarMultiInts columnarMultiInts = supplierFromByteBuffer.get()) {
-        assertEquals(columnarMultiInts.size(), vals.size());
+        Assert.assertEquals(columnarMultiInts.size(), vals.size());
         for (int i = 0; i < vals.size(); ++i) {
           IndexedInts subVals = columnarMultiInts.get(i);
-          assertEquals(subVals.size(), vals.get(i).length);
+          Assert.assertEquals(subVals.size(), vals.get(i).length);
           for (int j = 0, size = subVals.size(); j < size; ++j) {
-            assertEquals(subVals.get(j), vals.get(i)[j]);
+            Assert.assertEquals(subVals.get(j), vals.get(i)[j]);
           }
         }
       }
     }
   }
 
-  int getMaxValue(final List<int[]> vals)
+  private int getMaxValue(final List<int[]> vals)
   {
     return vals
         .stream()
@@ -218,11 +217,11 @@ public class V3CompressedVSizeColumnarMultiIntsSerializerTest
 
   private void checkV2SerializedSizeAndData(int offsetChunkFactor, int valueChunkFactor) throws Exception
   {
-    File tmpDirectory = Files.createTempDirectory(StringUtils.format(
+    File tmpDirectory = FileUtils.createTempDir(StringUtils.format(
         "CompressedVSizeIndexedV3WriterTest_%d_%d",
         offsetChunkFactor,
         offsetChunkFactor
-    )).toFile();
+    ));
     FileSmoosher smoosher = new FileSmoosher(tmpDirectory);
     int maxValue = vals.size() > 0 ? getMaxValue(vals) : 0;
 
@@ -270,12 +269,12 @@ public class V3CompressedVSizeColumnarMultiIntsSerializerTest
       V3CompressedVSizeColumnarMultiIntsSupplier supplierFromByteBuffer =
           V3CompressedVSizeColumnarMultiIntsSupplier.fromByteBuffer(mapper.mapFile("test"), byteOrder);
       ColumnarMultiInts columnarMultiInts = supplierFromByteBuffer.get();
-      assertEquals(columnarMultiInts.size(), vals.size());
+      Assert.assertEquals(columnarMultiInts.size(), vals.size());
       for (int i = 0; i < vals.size(); ++i) {
         IndexedInts subVals = columnarMultiInts.get(i);
-        assertEquals(subVals.size(), vals.get(i).length);
+        Assert.assertEquals(subVals.size(), vals.get(i).length);
         for (int j = 0, size = subVals.size(); j < size; ++j) {
-          assertEquals(subVals.get(j), vals.get(i)[j]);
+          Assert.assertEquals(subVals.get(j), vals.get(i)[j]);
         }
       }
       CloseQuietly.close(columnarMultiInts);

@@ -23,8 +23,10 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
+import org.apache.druid.segment.SegmentUtils;
 import org.apache.druid.timeline.DataSegment;
 
+import javax.annotation.Nullable;
 import java.util.Objects;
 import java.util.Set;
 
@@ -42,20 +44,29 @@ public class SegmentPublishResult
 {
   private final Set<DataSegment> segments;
   private final boolean success;
+  @Nullable
+  private final String errorMsg;
 
-  public static SegmentPublishResult fail()
+  public static SegmentPublishResult ok(Set<DataSegment> segments)
   {
-    return new SegmentPublishResult(ImmutableSet.of(), false);
+    return new SegmentPublishResult(segments, true, null);
+  }
+
+  public static SegmentPublishResult fail(String errorMsg)
+  {
+    return new SegmentPublishResult(ImmutableSet.of(), false, errorMsg);
   }
 
   @JsonCreator
-  public SegmentPublishResult(
+  private SegmentPublishResult(
       @JsonProperty("segments") Set<DataSegment> segments,
-      @JsonProperty("success") boolean success
+      @JsonProperty("success") boolean success,
+      @JsonProperty("errorMsg") @Nullable String errorMsg
   )
   {
     this.segments = Preconditions.checkNotNull(segments, "segments");
     this.success = success;
+    this.errorMsg = errorMsg;
 
     if (!success) {
       Preconditions.checkArgument(segments.isEmpty(), "segments must be empty for unsuccessful publishes");
@@ -74,6 +85,13 @@ public class SegmentPublishResult
     return success;
   }
 
+  @JsonProperty
+  @Nullable
+  public String getErrorMsg()
+  {
+    return errorMsg;
+  }
+
   @Override
   public boolean equals(Object o)
   {
@@ -85,21 +103,23 @@ public class SegmentPublishResult
     }
     SegmentPublishResult that = (SegmentPublishResult) o;
     return success == that.success &&
-           Objects.equals(segments, that.segments);
+           Objects.equals(segments, that.segments) &&
+           Objects.equals(errorMsg, that.errorMsg);
   }
 
   @Override
   public int hashCode()
   {
-    return Objects.hash(segments, success);
+    return Objects.hash(segments, success, errorMsg);
   }
 
   @Override
   public String toString()
   {
     return "SegmentPublishResult{" +
-           "segments=" + segments +
+           "segments=" + SegmentUtils.commaSeparatedIdentifiers(segments) +
            ", success=" + success +
+           ", errorMsg='" + errorMsg + '\'' +
            '}';
   }
 }

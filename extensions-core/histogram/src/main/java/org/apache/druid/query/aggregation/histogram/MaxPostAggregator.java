@@ -35,14 +35,8 @@ import java.util.Set;
 @JsonTypeName("max")
 public class MaxPostAggregator extends ApproximateHistogramPostAggregator
 {
-  static final Comparator COMPARATOR = new Comparator()
-  {
-    @Override
-    public int compare(Object o, Object o1)
-    {
-      return Double.compare(((Number) o).doubleValue(), ((Number) o1).doubleValue());
-    }
-  };
+  // this doesn't need to handle nulls because the values come from ApproximateHistogram
+  static final Comparator COMPARATOR = Comparator.comparingDouble(o -> ((Number) o).doubleValue());
 
   @JsonCreator
   public MaxPostAggregator(
@@ -68,8 +62,14 @@ public class MaxPostAggregator extends ApproximateHistogramPostAggregator
   @Override
   public Object compute(Map<String, Object> values)
   {
-    final ApproximateHistogram ah = (ApproximateHistogram) values.get(fieldName);
-    return ah.getMax();
+    Object val = values.get(fieldName);
+    if (val instanceof ApproximateHistogram) {
+      final ApproximateHistogram ah = (ApproximateHistogram) val;
+      return ah.getMax();
+    } else {
+      final FixedBucketsHistogram fbh = (FixedBucketsHistogram) val;
+      return fbh.getMax();
+    }
   }
 
   @Override

@@ -20,22 +20,31 @@
 package org.apache.druid.client;
 
 import org.apache.druid.client.selector.ServerSelector;
-import org.apache.druid.query.DataSource;
 import org.apache.druid.query.QueryRunner;
+import org.apache.druid.query.planning.DataSourceAnalysis;
 import org.apache.druid.server.coordination.DruidServerMetadata;
 import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.timeline.TimelineLookup;
 
-import javax.annotation.Nullable;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Executor;
 
 /**
  */
 public interface TimelineServerView extends ServerView
 {
-  @Nullable
-  TimelineLookup<String, ServerSelector> getTimeline(DataSource dataSource);
+  /**
+   * Returns the timeline for a datasource, if it exists. The analysis object passed in must represent a scan-based
+   * datasource of a single table.
+   *
+   * @param analysis data source analysis information
+   *
+   * @return timeline, if it exists
+   *
+   * @throws IllegalStateException if 'analysis' does not represent a scan-based datasource of a single table
+   */
+  Optional<? extends TimelineLookup<String, ServerSelector>> getTimeline(DataSourceAnalysis analysis);
 
   /**
    * Returns a list of {@link ImmutableDruidServer}
@@ -81,5 +90,16 @@ public interface TimelineServerView extends ServerView
      * @return continue or unregister
      */
     CallbackAction segmentRemoved(DataSegment segment);
+
+    /**
+     * Called when a segment is removed from a server. Note that the timeline can still have the segment, even though it's removed from given server.
+     * {@link #segmentRemoved(DataSegment)} is the authority on when segment is removed from the timeline.
+     *
+     * @param server  The server that removed a segment
+     * @param segment The segment that was removed
+     *
+     * @return continue or unregister
+     */
+    CallbackAction serverSegmentRemoved(DruidServerMetadata server, DataSegment segment);
   }
 }

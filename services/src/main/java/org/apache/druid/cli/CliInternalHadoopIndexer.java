@@ -21,7 +21,6 @@ package org.apache.druid.cli;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Injector;
 import com.google.inject.Module;
@@ -37,7 +36,7 @@ import org.apache.druid.indexer.HadoopIngestionSpec;
 import org.apache.druid.indexer.JobHelper;
 import org.apache.druid.indexer.Jobby;
 import org.apache.druid.indexer.MetadataStorageUpdaterJobHandler;
-import org.apache.druid.indexer.path.MetadataStoreBasedUsedSegmentLister;
+import org.apache.druid.indexer.path.MetadataStoreBasedUsedSegmentsRetriever;
 import org.apache.druid.indexer.updater.MetadataStorageUpdaterJobSpec;
 import org.apache.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
 import org.apache.druid.java.util.common.logger.Logger;
@@ -56,7 +55,7 @@ import java.util.Properties;
  */
 @Command(
     name = "hadoop-indexer",
-    description = "Runs the batch Hadoop Druid Indexer, see http://druid.io/docs/latest/Batch-ingestion.html for a description."
+    description = "Runs the batch Hadoop Druid Indexer, see https://druid.apache.org/docs/latest/Batch-ingestion.html for a description."
 )
 public class CliInternalHadoopIndexer extends GuiceRunnable
 {
@@ -109,13 +108,11 @@ public class CliInternalHadoopIndexer extends GuiceRunnable
       Preconditions.checkNotNull(metadataSpec.getType(), "type in metadataUpdateSpec must not be null");
       injector.getInstance(Properties.class).setProperty("druid.metadata.storage.type", metadataSpec.getType());
 
-      config = HadoopDruidIndexerConfig.fromSpec(
-          HadoopIngestionSpec.updateSegmentListIfDatasourcePathSpecIsUsed(
-              config.getSchema(),
-              HadoopDruidIndexerConfig.JSON_MAPPER,
-              new MetadataStoreBasedUsedSegmentLister(
-                  injector.getInstance(IndexerMetadataStorageCoordinator.class)
-              )
+      HadoopIngestionSpec.updateSegmentListIfDatasourcePathSpecIsUsed(
+          config.getSchema(),
+          HadoopDruidIndexerConfig.JSON_MAPPER,
+          new MetadataStoreBasedUsedSegmentsRetriever(
+              injector.getInstance(IndexerMetadataStorageCoordinator.class)
           )
       );
 
@@ -126,7 +123,7 @@ public class CliInternalHadoopIndexer extends GuiceRunnable
 
     }
     catch (Exception e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -161,7 +158,7 @@ public class CliInternalHadoopIndexer extends GuiceRunnable
         }
       }
       catch (Exception e) {
-        throw Throwables.propagate(e);
+        throw new RuntimeException(e);
       }
     }
     return config;

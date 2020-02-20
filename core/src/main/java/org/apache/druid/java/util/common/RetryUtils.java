@@ -32,6 +32,7 @@ public class RetryUtils
   public static final Logger log = new Logger(RetryUtils.class);
   public static final long MAX_SLEEP_MILLIS = 60000;
   public static final long BASE_SLEEP_MILLIS = 1000;
+  public static final int DEFAULT_MAX_TRIES = 10;
 
   public interface Task<T>
   {
@@ -93,7 +94,7 @@ public class RetryUtils
           awaitNextRetry(e, messageOnRetry, nTry, maxRetries, nTry <= quietTries);
         } else {
           Throwables.propagateIfInstanceOf(e, Exception.class);
-          throw Throwables.propagate(e);
+          throw new RuntimeException(e);
         }
       }
     }

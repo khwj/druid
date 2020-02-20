@@ -22,8 +22,10 @@ package org.apache.druid.indexing.kafka.supervisor;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
+import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorIOConfig;
 import org.apache.druid.java.util.common.StringUtils;
+import org.joda.time.DateTime;
 import org.joda.time.Period;
 
 import java.util.Map;
@@ -34,28 +36,33 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
   public static final String TRUST_STORE_PASSWORD_KEY = "ssl.truststore.password";
   public static final String KEY_STORE_PASSWORD_KEY = "ssl.keystore.password";
   public static final String KEY_PASSWORD_KEY = "ssl.key.password";
+  public static final long DEFAULT_POLL_TIMEOUT_MILLIS = 100;
 
   private final Map<String, Object> consumerProperties;
-  private final boolean skipOffsetGaps;
+  private final long pollTimeout;
+
 
   @JsonCreator
   public KafkaSupervisorIOConfig(
       @JsonProperty("topic") String topic,
+      @JsonProperty("inputFormat") InputFormat inputFormat,
       @JsonProperty("replicas") Integer replicas,
       @JsonProperty("taskCount") Integer taskCount,
       @JsonProperty("taskDuration") Period taskDuration,
       @JsonProperty("consumerProperties") Map<String, Object> consumerProperties,
+      @JsonProperty("pollTimeout") Long pollTimeout,
       @JsonProperty("startDelay") Period startDelay,
       @JsonProperty("period") Period period,
       @JsonProperty("useEarliestOffset") Boolean useEarliestOffset,
       @JsonProperty("completionTimeout") Period completionTimeout,
       @JsonProperty("lateMessageRejectionPeriod") Period lateMessageRejectionPeriod,
       @JsonProperty("earlyMessageRejectionPeriod") Period earlyMessageRejectionPeriod,
-      @JsonProperty("skipOffsetGaps") Boolean skipOffsetGaps
+      @JsonProperty("lateMessageRejectionStartDateTime") DateTime lateMessageRejectionStartDateTime
   )
   {
     super(
         Preconditions.checkNotNull(topic, "topic"),
+        inputFormat,
         replicas,
         taskCount,
         taskDuration,
@@ -64,7 +71,8 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
         useEarliestOffset,
         completionTimeout,
         lateMessageRejectionPeriod,
-        earlyMessageRejectionPeriod
+        earlyMessageRejectionPeriod,
+        lateMessageRejectionStartDateTime
     );
 
     this.consumerProperties = Preconditions.checkNotNull(consumerProperties, "consumerProperties");
@@ -72,7 +80,7 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
         consumerProperties.get(BOOTSTRAP_SERVERS_KEY),
         StringUtils.format("consumerProperties must contain entry for [%s]", BOOTSTRAP_SERVERS_KEY)
     );
-    this.skipOffsetGaps = skipOffsetGaps != null ? skipOffsetGaps : false;
+    this.pollTimeout = pollTimeout != null ? pollTimeout : DEFAULT_POLL_TIMEOUT_MILLIS;
   }
 
   @JsonProperty
@@ -88,15 +96,15 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
   }
 
   @JsonProperty
-  public boolean isUseEarliestOffset()
+  public long getPollTimeout()
   {
-    return isUseEarliestSequenceNumber();
+    return pollTimeout;
   }
 
   @JsonProperty
-  public boolean isSkipOffsetGaps()
+  public boolean isUseEarliestOffset()
   {
-    return skipOffsetGaps;
+    return isUseEarliestSequenceNumber();
   }
 
   @Override
@@ -108,13 +116,14 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
            ", taskCount=" + getTaskCount() +
            ", taskDuration=" + getTaskDuration() +
            ", consumerProperties=" + consumerProperties +
+           ", pollTimeout=" + pollTimeout +
            ", startDelay=" + getStartDelay() +
            ", period=" + getPeriod() +
            ", useEarliestOffset=" + isUseEarliestOffset() +
            ", completionTimeout=" + getCompletionTimeout() +
            ", earlyMessageRejectionPeriod=" + getEarlyMessageRejectionPeriod() +
            ", lateMessageRejectionPeriod=" + getLateMessageRejectionPeriod() +
-           ", skipOffsetGaps=" + skipOffsetGaps +
+           ", lateMessageRejectionStartDateTime=" + getLateMessageRejectionStartDateTime() +
            '}';
   }
 

@@ -21,7 +21,6 @@ package org.apache.druid.indexing.common.actions;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Suppliers;
-import org.apache.druid.indexing.common.Counters;
 import org.apache.druid.indexing.common.TestUtils;
 import org.apache.druid.indexing.common.config.TaskStorageConfig;
 import org.apache.druid.indexing.overlord.HeapMemoryTaskStorage;
@@ -30,11 +29,11 @@ import org.apache.druid.indexing.overlord.TaskLockbox;
 import org.apache.druid.indexing.overlord.TaskStorage;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorManager;
 import org.apache.druid.metadata.IndexerSQLMetadataStorageCoordinator;
-import org.apache.druid.metadata.MetadataSegmentManager;
-import org.apache.druid.metadata.MetadataSegmentManagerConfig;
 import org.apache.druid.metadata.MetadataStorageConnectorConfig;
 import org.apache.druid.metadata.MetadataStorageTablesConfig;
-import org.apache.druid.metadata.SQLMetadataSegmentManager;
+import org.apache.druid.metadata.SegmentsMetadataManager;
+import org.apache.druid.metadata.SegmentsMetadataManagerConfig;
+import org.apache.druid.metadata.SqlSegmentsMetadataManager;
 import org.apache.druid.metadata.TestDerbyConnector;
 import org.apache.druid.server.metrics.NoopServiceEmitter;
 import org.easymock.EasyMock;
@@ -49,7 +48,7 @@ public class TaskActionTestKit extends ExternalResource
   private TaskLockbox taskLockbox;
   private TestDerbyConnector testDerbyConnector;
   private IndexerMetadataStorageCoordinator metadataStorageCoordinator;
-  private MetadataSegmentManager metadataSegmentManager;
+  private SegmentsMetadataManager segmentsMetadataManager;
   private TaskActionToolbox taskActionToolbox;
 
   public TaskLockbox getTaskLockbox()
@@ -62,9 +61,9 @@ public class TaskActionTestKit extends ExternalResource
     return metadataStorageCoordinator;
   }
 
-  public MetadataSegmentManager getMetadataSegmentManager()
+  public SegmentsMetadataManager getSegmentsMetadataManager()
   {
-    return metadataSegmentManager;
+    return segmentsMetadataManager;
   }
 
   public TaskActionToolbox getTaskActionToolbox()
@@ -76,7 +75,6 @@ public class TaskActionTestKit extends ExternalResource
   public void before()
   {
     taskStorage = new HeapMemoryTaskStorage(new TaskStorageConfig(new Period("PT24H")));
-    taskLockbox = new TaskLockbox(taskStorage);
     testDerbyConnector = new TestDerbyConnector(
         Suppliers.ofInstance(new MetadataStorageConnectorConfig()),
         Suppliers.ofInstance(metadataStorageTablesConfig)
@@ -87,9 +85,10 @@ public class TaskActionTestKit extends ExternalResource
         metadataStorageTablesConfig,
         testDerbyConnector
     );
-    metadataSegmentManager = new SQLMetadataSegmentManager(
+    taskLockbox = new TaskLockbox(taskStorage, metadataStorageCoordinator);
+    segmentsMetadataManager = new SqlSegmentsMetadataManager(
         objectMapper,
-        Suppliers.ofInstance(new MetadataSegmentManagerConfig()),
+        Suppliers.ofInstance(new SegmentsMetadataManagerConfig()),
         Suppliers.ofInstance(metadataStorageTablesConfig),
         testDerbyConnector
     );
@@ -98,8 +97,7 @@ public class TaskActionTestKit extends ExternalResource
         taskStorage,
         metadataStorageCoordinator,
         new NoopServiceEmitter(),
-        EasyMock.createMock(SupervisorManager.class),
-        new Counters()
+        EasyMock.createMock(SupervisorManager.class)
     );
     testDerbyConnector.createDataSourceTable();
     testDerbyConnector.createPendingSegmentsTable();
@@ -118,7 +116,7 @@ public class TaskActionTestKit extends ExternalResource
     taskLockbox = null;
     testDerbyConnector = null;
     metadataStorageCoordinator = null;
-    metadataSegmentManager = null;
+    segmentsMetadataManager = null;
     taskActionToolbox = null;
   }
 }

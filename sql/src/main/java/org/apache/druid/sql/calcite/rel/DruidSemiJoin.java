@@ -22,7 +22,6 @@ package org.apache.druid.sql.calcite.rel;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-import org.apache.calcite.interpreter.BindableConvention;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptCost;
 import org.apache.calcite.plan.RelOptPlanner;
@@ -157,21 +156,6 @@ public class DruidSemiJoin extends DruidRel<DruidSemiJoin>
   }
 
   @Override
-  public DruidSemiJoin asBindable()
-  {
-    return new DruidSemiJoin(
-        getCluster(),
-        getTraitSet().replace(BindableConvention.INSTANCE),
-        left,
-        RelOptRule.convert(right, BindableConvention.INSTANCE),
-        leftExpressions,
-        rightKeys,
-        maxSemiJoinRowsInMemory,
-        getQueryMaker()
-    );
-  }
-
-  @Override
   public DruidSemiJoin asDruidConvention()
   {
     return new DruidSemiJoin(
@@ -187,13 +171,13 @@ public class DruidSemiJoin extends DruidRel<DruidSemiJoin>
   }
 
   @Override
-  public List<String> getDatasourceNames()
+  public Set<String> getDataSourceNames()
   {
     final DruidRel<?> druidRight = (DruidRel) this.right;
-    Set<String> datasourceNames = new LinkedHashSet<>();
-    datasourceNames.addAll(left.getDatasourceNames());
-    datasourceNames.addAll(druidRight.getDatasourceNames());
-    return new ArrayList<>(datasourceNames);
+    Set<String> dataSourceNames = new LinkedHashSet<>();
+    dataSourceNames.addAll(left.getDataSourceNames());
+    dataSourceNames.addAll(druidRight.getDataSourceNames());
+    return dataSourceNames;
   }
 
   @Override
@@ -360,8 +344,7 @@ public class DruidSemiJoin extends DruidRel<DruidSemiJoin>
 
       PartialDruidQuery newPartialQuery = PartialDruidQuery.create(leftPartialQuery.getScan())
                                                            .withWhereFilter(newWhereFilter)
-                                                           .withSelectProject(leftPartialQuery.getSelectProject())
-                                                           .withSelectSort(leftPartialQuery.getSelectSort());
+                                                           .withSelectProject(leftPartialQuery.getSelectProject());
 
       if (leftPartialQuery.getAggregate() != null) {
         newPartialQuery = newPartialQuery.withAggregate(leftPartialQuery.getAggregate());
@@ -375,12 +358,12 @@ public class DruidSemiJoin extends DruidRel<DruidSemiJoin>
         newPartialQuery = newPartialQuery.withAggregateProject(leftPartialQuery.getAggregateProject());
       }
 
-      if (leftPartialQuery.getSortProject() != null) {
-        newPartialQuery = newPartialQuery.withSortProject(leftPartialQuery.getSortProject());
-      }
-
       if (leftPartialQuery.getSort() != null) {
         newPartialQuery = newPartialQuery.withSort(leftPartialQuery.getSort());
+      }
+
+      if (leftPartialQuery.getSortProject() != null) {
+        newPartialQuery = newPartialQuery.withSortProject(leftPartialQuery.getSortProject());
       }
 
       return left.withPartialQuery(newPartialQuery);

@@ -36,6 +36,7 @@ import org.apache.druid.segment.IndexIO;
 import org.apache.druid.segment.IndexMerger;
 import org.apache.druid.segment.indexing.DataSchema;
 import org.apache.druid.segment.indexing.RealtimeTuningConfig;
+import org.apache.druid.segment.join.JoinableFactory;
 import org.apache.druid.segment.realtime.FireDepartmentMetrics;
 import org.apache.druid.server.coordination.DataSegmentAnnouncer;
 import org.joda.time.DateTime;
@@ -70,6 +71,7 @@ public class FlushingPlumber extends RealtimePlumber
       QueryRunnerFactoryConglomerate conglomerate,
       DataSegmentAnnouncer segmentAnnouncer,
       ExecutorService queryExecutorService,
+      JoinableFactory joinableFactory,
       IndexMerger indexMerger,
       IndexIO indexIO,
       Cache cache,
@@ -87,6 +89,7 @@ public class FlushingPlumber extends RealtimePlumber
         conglomerate,
         segmentAnnouncer,
         queryExecutorService,
+        joinableFactory,
         null,
         null,
         null,
@@ -124,7 +127,7 @@ public class FlushingPlumber extends RealtimePlumber
   {
     log.info(
         "Abandoning segment %s at %s",
-        sink.getSegment().getIdentifier(),
+        sink.getSegment().getId(),
         DateTimes.nowUtc().plusMillis((int) flushDuration.getMillis())
     );
 
@@ -136,7 +139,7 @@ public class FlushingPlumber extends RealtimePlumber
           @Override
           public ScheduledExecutors.Signal call()
           {
-            log.info("Abandoning segment %s", sink.getSegment().getIdentifier());
+            log.info("Abandoning segment %s", sink.getSegment().getId());
             abandonSegment(truncatedTime, sink);
             return ScheduledExecutors.Signal.STOP;
           }

@@ -36,14 +36,13 @@ import org.apache.druid.query.filter.InDimFilter;
 import org.apache.druid.query.filter.SelectorDimFilter;
 import org.apache.druid.query.metadata.metadata.ColumnIncluderator;
 import org.apache.druid.query.metadata.metadata.SegmentMetadataQuery;
+import org.apache.druid.query.scan.ScanQuery;
 import org.apache.druid.query.search.ContainsSearchQuerySpec;
 import org.apache.druid.query.search.FragmentSearchQuerySpec;
 import org.apache.druid.query.search.InsensitiveContainsSearchQuerySpec;
 import org.apache.druid.query.search.SearchQuery;
 import org.apache.druid.query.search.SearchQuerySpec;
 import org.apache.druid.query.search.SearchSortSpec;
-import org.apache.druid.query.select.PagingSpec;
-import org.apache.druid.query.select.SelectQuery;
 import org.apache.druid.query.spec.LegacySegmentSpec;
 import org.apache.druid.query.spec.QuerySegmentSpec;
 import org.apache.druid.query.timeboundary.TimeBoundaryQuery;
@@ -203,7 +202,7 @@ public class Druids
 
     public TimeseriesQueryBuilder filters(String dimensionName, String value, String... values)
     {
-      dimFilter = new InDimFilter(dimensionName, Lists.asList(value, values), null);
+      dimFilter = new InDimFilter(dimensionName, Lists.asList(value, values), null, null);
       return this;
     }
 
@@ -360,7 +359,7 @@ public class Druids
 
     public SearchQueryBuilder filters(String dimensionName, String value)
     {
-      dimFilter = new SelectorDimFilter(dimensionName, value, null);
+      dimFilter = new SelectorDimFilter(dimensionName, value, null, null);
       return this;
     }
 
@@ -730,170 +729,169 @@ public class Druids
   }
 
   /**
-   * A Builder for SelectQuery.
+   * A Builder for ScanQuery.
    * <p/>
    * Required: dataSource(), intervals() must be called before build()
    * <p/>
    * Usage example:
    * <pre><code>
-   *   SelectQuery query = new SelectQueryBuilder()
+   *   ScanQuery query = new ScanQueryBuilder()
    *                                  .dataSource("Example")
    *                                  .interval("2010/2013")
    *                                  .build();
    * </code></pre>
    *
-   * @see SelectQuery
+   * @see ScanQuery
    */
-  public static class SelectQueryBuilder
+  public static class ScanQueryBuilder
   {
     private DataSource dataSource;
     private QuerySegmentSpec querySegmentSpec;
-    private boolean descending;
-    private Map<String, Object> context;
-    private DimFilter dimFilter;
-    private Granularity granularity;
-    private List<DimensionSpec> dimensions;
-    private List<String> metrics;
     private VirtualColumns virtualColumns;
-    private PagingSpec pagingSpec;
+    private Map<String, Object> context;
+    private ScanQuery.ResultFormat resultFormat;
+    private int batchSize;
+    private long limit;
+    private DimFilter dimFilter;
+    private List<String> columns;
+    private Boolean legacy;
+    private ScanQuery.Order order;
 
-    public SelectQueryBuilder()
+    public ScanQueryBuilder()
     {
       dataSource = null;
       querySegmentSpec = null;
-      descending = false;
-      context = null;
-      dimFilter = null;
-      granularity = Granularities.ALL;
-      dimensions = new ArrayList<>();
-      metrics = new ArrayList<>();
       virtualColumns = null;
-      pagingSpec = null;
+      context = null;
+      resultFormat = null;
+      batchSize = 0;
+      limit = 0;
+      dimFilter = null;
+      columns = new ArrayList<>();
+      legacy = null;
+      order = null;
     }
 
-    public SelectQuery build()
+    public ScanQuery build()
     {
-      return new SelectQuery(
+      return new ScanQuery(
           dataSource,
           querySegmentSpec,
-          descending,
-          dimFilter,
-          granularity,
-          dimensions,
-          metrics,
           virtualColumns,
-          pagingSpec,
+          resultFormat,
+          batchSize,
+          limit,
+          order,
+          dimFilter,
+          columns,
+          legacy,
           context
       );
     }
 
-    public static SelectQueryBuilder copy(SelectQuery query)
+    public static ScanQueryBuilder copy(ScanQuery query)
     {
-      return new SelectQueryBuilder()
+      return new ScanQueryBuilder()
           .dataSource(query.getDataSource())
           .intervals(query.getQuerySegmentSpec())
-          .descending(query.isDescending())
-          .filters(query.getFilter())
-          .granularity(query.getGranularity())
-          .dimensionSpecs(query.getDimensions())
-          .metrics(query.getMetrics())
           .virtualColumns(query.getVirtualColumns())
-          .pagingSpec(query.getPagingSpec())
-          .context(query.getContext());
+          .resultFormat(query.getResultFormat())
+          .batchSize(query.getBatchSize())
+          .limit(query.getScanRowsLimit())
+          .filters(query.getFilter())
+          .columns(query.getColumns())
+          .legacy(query.isLegacy())
+          .context(query.getContext())
+          .order(query.getOrder());
     }
 
-    public SelectQueryBuilder dataSource(String ds)
+    public ScanQueryBuilder dataSource(String ds)
     {
       dataSource = new TableDataSource(ds);
       return this;
     }
 
-    public SelectQueryBuilder dataSource(DataSource ds)
+    public ScanQueryBuilder dataSource(DataSource ds)
     {
       dataSource = ds;
       return this;
     }
 
-    public SelectQueryBuilder intervals(QuerySegmentSpec q)
+    public ScanQueryBuilder intervals(QuerySegmentSpec q)
     {
       querySegmentSpec = q;
       return this;
     }
 
-    public SelectQueryBuilder intervals(String s)
+    public ScanQueryBuilder virtualColumns(VirtualColumns virtualColumns)
     {
-      querySegmentSpec = new LegacySegmentSpec(s);
+      this.virtualColumns = virtualColumns;
       return this;
     }
 
-    public SelectQueryBuilder descending(boolean descending)
+    public ScanQueryBuilder virtualColumns(VirtualColumn... virtualColumns)
     {
-      this.descending = descending;
-      return this;
+      return virtualColumns(VirtualColumns.create(Arrays.asList(virtualColumns)));
     }
 
-    public SelectQueryBuilder context(Map<String, Object> c)
+    public ScanQueryBuilder context(Map<String, Object> c)
     {
       context = c;
       return this;
     }
 
-    public SelectQueryBuilder filters(DimFilter f)
+    public ScanQueryBuilder resultFormat(ScanQuery.ResultFormat r)
+    {
+      resultFormat = r;
+      return this;
+    }
+
+    public ScanQueryBuilder batchSize(int b)
+    {
+      batchSize = b;
+      return this;
+    }
+
+    public ScanQueryBuilder limit(long l)
+    {
+      limit = l;
+      return this;
+    }
+
+    public ScanQueryBuilder filters(DimFilter f)
     {
       dimFilter = f;
       return this;
     }
 
-    public SelectQueryBuilder granularity(Granularity g)
+    public ScanQueryBuilder columns(List<String> c)
     {
-      granularity = g;
+      columns = c;
       return this;
     }
 
-    public SelectQueryBuilder dimensionSpecs(List<DimensionSpec> d)
+    public ScanQueryBuilder columns(String... c)
     {
-      dimensions = d;
+      columns = Arrays.asList(c);
       return this;
     }
 
-    public SelectQueryBuilder dimensions(List<String> d)
+    public ScanQueryBuilder legacy(Boolean legacy)
     {
-      dimensions = DefaultDimensionSpec.toSpec(d);
+      this.legacy = legacy;
       return this;
     }
 
-    public SelectQueryBuilder metrics(List<String> m)
+    public ScanQueryBuilder order(ScanQuery.Order order)
     {
-      metrics = m;
-      return this;
-    }
-
-    public SelectQueryBuilder virtualColumns(VirtualColumns vcs)
-    {
-      virtualColumns = vcs;
-      return this;
-    }
-
-    public SelectQueryBuilder virtualColumns(List<VirtualColumn> vcs)
-    {
-      return virtualColumns(VirtualColumns.create(vcs));
-    }
-
-    public SelectQueryBuilder virtualColumns(VirtualColumn... vcs)
-    {
-      return virtualColumns(VirtualColumns.create(Arrays.asList(vcs)));
-    }
-
-    public SelectQueryBuilder pagingSpec(PagingSpec p)
-    {
-      pagingSpec = p;
+      this.order = order;
       return this;
     }
   }
 
-  public static SelectQueryBuilder newSelectQueryBuilder()
+  public static ScanQueryBuilder newScanQueryBuilder()
   {
-    return new SelectQueryBuilder();
+    return new ScanQueryBuilder();
   }
 
   /**

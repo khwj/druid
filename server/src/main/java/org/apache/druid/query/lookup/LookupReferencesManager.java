@@ -43,7 +43,7 @@ import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.lifecycle.LifecycleStart;
 import org.apache.druid.java.util.common.lifecycle.LifecycleStop;
 import org.apache.druid.java.util.emitter.EmittingLogger;
-import org.apache.druid.java.util.http.client.response.FullResponseHolder;
+import org.apache.druid.java.util.http.client.response.StringFullResponseHolder;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.jboss.netty.handler.codec.http.HttpResponseStatus;
 
@@ -55,6 +55,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutionException;
@@ -67,14 +68,17 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.function.Function;
 
 /**
- * This class provide a basic {@link LookupExtractorFactory} references manager.
- * It allows basic operations fetching, listing, adding and deleting of {@link LookupExtractor} objects
- * It is be used by queries to fetch the lookup reference.
- * It is used by Lookup configuration manager to add/remove or list lookups configuration via HTTP or other protocols.
- * It does periodic snap shot of the list of lookup in order to bootstrap nodes after restart.
+ * This class provide a basic {@link LookupExtractorFactory} references manager. It allows basic operations fetching,
+ * listing, adding and deleting of {@link LookupExtractor} objects, and can take periodic snap shot of the loaded lookup
+ * extractor specifications in order to bootstrap nodes after restart.
+ *
+ * It also implements {@link LookupExtractorFactoryContainerProvider}, to supply queries and indexing transformations
+ * with a reference to a {@link LookupExtractorFactoryContainer}. This class is a companion of
+ * {@link org.apache.druid.server.lookup.cache.LookupCoordinatorManager}, which communicates with
+ * {@link LookupReferencesManager} through {@link LookupListeningResource}.
  */
 @ManageLifecycle
-public class LookupReferencesManager
+public class LookupReferencesManager implements LookupExtractorFactoryContainerProvider
 {
   private static final EmittingLogger LOG = new EmittingLogger(LookupReferencesManager.class);
 
@@ -149,15 +153,15 @@ public class LookupReferencesManager
       throw new ISE("can't start.");
     }
     try {
-      LOG.info("LookupReferencesManager is starting.");
+      LOG.debug("LookupExtractorFactoryContainerProvider starting.");
       loadAllLookupsAndInitStateRef();
       if (!testMode) {
         mainThread = Execs.makeThread(
-            "LookupReferencesManager-MainThread",
+            "LookupExtractorFactoryContainerProvider-MainThread",
             () -> {
               try {
                 if (!lifecycleLock.awaitStarted()) {
-                  LOG.error("WTF! lifecycle not started, lookup update notices will not be handled.");
+                  LOG.error("Lifecycle not started, lookup update notices will not be handled.");
                   return;
                 }
 
@@ -175,7 +179,7 @@ public class LookupReferencesManager
                 LOG.error(t, "Error while waiting for lifecycle start. lookup updates notices will not be handled");
               }
               finally {
-                LOG.info("Lookup Management loop exited, Lookup notices are not handled anymore.");
+                LOG.info("Lookup Management loop exited. Lookup notices are not handled anymore.");
               }
             },
             true
@@ -184,7 +188,7 @@ public class LookupReferencesManager
         mainThread.start();
       }
 
-      LOG.info("LookupReferencesManager is started.");
+      LOG.debug("LookupExtractorFactoryContainerProvider started.");
       lifecycleLock.started();
     }
     finally {
@@ -231,7 +235,7 @@ public class LookupReferencesManager
       throw new ISE("can't stop.");
     }
 
-    LOG.info("LookupReferencesManager is stopping.");
+    LOG.debug("LookupExtractorFactoryContainerProvider is stopping.");
 
     if (!testMode) {
       mainThread.interrupt();
@@ -246,8 +250,9 @@ public class LookupReferencesManager
 
     for (Map.Entry<String, LookupExtractorFactoryContainer> e : stateRef.get().lookupMap.entrySet()) {
       try {
-        LOG.info("Closing lookup [%s]", e.getKey());
-        if (!e.getValue().getLookupExtractorFactory().close()) {
+        if (e.getValue().getLookupExtractorFactory().close()) {
+          LOG.info("Closed lookup [%s].", e.getKey());
+        } else {
           LOG.error("Failed to close lookup [%s].", e.getKey());
         }
       }
@@ -256,8 +261,9 @@ public class LookupReferencesManager
       }
     }
 
-    LOG.info("LookupReferencesManager is stopped.");
+    LOG.debug("LookupExtractorFactoryContainerProvider is stopped.");
   }
+
 
   public void add(String lookupName, LookupExtractorFactoryContainer lookupExtractorFactoryContainer)
   {
@@ -289,15 +295,21 @@ public class LookupReferencesManager
     LockSupport.unpark(mainThread);
   }
 
-  @Nullable
-  public LookupExtractorFactoryContainer get(String lookupName)
+  @Override
+  public Optional<LookupExtractorFactoryContainer> get(String lookupName)
   {
     Preconditions.checkState(lifecycleLock.awaitStarted(1, TimeUnit.MILLISECONDS));
-    return stateRef.get().lookupMap.get(lookupName);
+    return Optional.ofNullable(stateRef.get().lookupMap.get(lookupName));
+  }
+
+  @Override
+  public Set<String> getAllLookupNames()
+  {
+    return stateRef.get().lookupMap.keySet();
   }
 
   // Note that this should ensure that "toLoad" and "toDrop" are disjoint.
-  public LookupsState<LookupExtractorFactoryContainer> getAllLookupsState()
+  LookupsState<LookupExtractorFactoryContainer> getAllLookupsState()
   {
     Preconditions.checkState(lifecycleLock.awaitStarted(1, TimeUnit.MILLISECONDS));
 
@@ -346,7 +358,7 @@ public class LookupReferencesManager
     if (lookupBeanList != null) {
       startLookups(lookupBeanList);
     } else {
-      LOG.info("No lookups to be loaded at this point");
+      LOG.debug("No lookups to be loaded at this point.");
       stateRef.set(new LookupUpdateState(ImmutableMap.of(), ImmutableList.of(), ImmutableList.of()));
     }
   }
@@ -414,7 +426,7 @@ public class LookupReferencesManager
   @Nullable
   private Map<String, LookupExtractorFactoryContainer> tryGetLookupListFromCoordinator(String tier) throws Exception
   {
-    final FullResponseHolder response = fetchLookupsForTier(tier);
+    final StringFullResponseHolder response = fetchLookupsForTier(tier);
     if (response.getStatus().equals(HttpResponseStatus.NOT_FOUND)) {
       LOG.warn("No lookups found for tier [%s], response [%s]", tier, response);
       return null;
@@ -470,13 +482,13 @@ public class LookupReferencesManager
     final ImmutableMap.Builder<String, LookupExtractorFactoryContainer> builder = ImmutableMap.builder();
     final ExecutorService executorService = Execs.multiThreaded(
         lookupConfig.getNumLookupLoadingThreads(),
-        "LookupReferencesManager-Startup-%s"
+        "LookupExtractorFactoryContainerProvider-Startup-%s"
     );
     final CompletionService<Map.Entry<String, LookupExtractorFactoryContainer>> completionService =
         new ExecutorCompletionService<>(executorService);
     final List<LookupBean> remainingLookups = new ArrayList<>(lookupBeanList);
     try {
-      LOG.info("Starting lookup loading process");
+      LOG.info("Starting lookup loading process.");
       for (int i = 0; i < lookupConfig.getLookupStartRetries() && !remainingLookups.isEmpty(); i++) {
         LOG.info("Round of attempts #%d, [%d] lookups", i + 1, remainingLookups.size());
         final Map<String, LookupExtractorFactoryContainer> successfulLookups =
@@ -559,8 +571,7 @@ public class LookupReferencesManager
     }
   }
 
-  private FullResponseHolder fetchLookupsForTier(String tier)
-      throws InterruptedException, IOException
+  private StringFullResponseHolder fetchLookupsForTier(String tier) throws InterruptedException, IOException
   {
     return druidLeaderClient.go(
         druidLeaderClient.makeRequest(

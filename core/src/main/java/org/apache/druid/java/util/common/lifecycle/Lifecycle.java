@@ -19,7 +19,9 @@
 
 package org.apache.druid.java.util.common.lifecycle;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import org.apache.commons.lang.StringUtils;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.logger.Logger;
 
@@ -38,15 +40,32 @@ import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * A manager of object Lifecycles.
- * <p/>
+ *
  * This object has methods for registering objects that should be started and stopped.  The Lifecycle allows for
- * two stages: Stage.NORMAL and Stage.LAST.
- * <p/>
- * Things added at Stage.NORMAL will be started first (in the order that they are added to the Lifecycle instance) and
- * then things added at Stage.LAST will be started.
- * <p/>
- * The close operation goes in reverse order, starting with the last thing added at Stage.LAST and working backwards.
- * <p/>
+ * four stages: {@link Stage#INIT}, {@link Stage#NORMAL}, {@link Stage#SERVER}, and {@link Stage#ANNOUNCEMENTS}.
+ *
+ * Things added at {@link Stage#INIT} will be started first (in the order that they are added to the Lifecycle instance)
+ * and then things added at {@link Stage#NORMAL}, then {@link Stage#SERVER}, and finally, {@link Stage#ANNOUNCEMENTS}
+ * will be started.
+ *
+ * The close operation goes in reverse order, starting with the last thing added at {@link Stage#ANNOUNCEMENTS} and
+ * working backwards.
+ *
+ * Conceptually, the stages have the following purposes:
+ *  - {@link Stage#INIT}: Currently, this stage is used exclusively for log4j initialization, since almost everything
+ *    needs logging and it should be the last thing to shutdown. Any sort of bootstrapping object that provides
+ *    something that should be initialized before nearly all other Lifecycle objects could also belong here (if it
+ *    doesn't need logging during start or stop).
+ *  - {@link Stage#NORMAL}: This is the default stage. Most objects will probably make the most sense to be registered
+ *    at this level, with the exception of any form of server or service announcements
+ *  - {@link Stage#SERVER}: This lifecycle stage is intended for all 'server' objects, for example,
+ *    org.apache.druid.server.initialization.jetty.JettyServerModule, but any sort of 'server' that expects most (or
+ *    some specific) Lifecycle objects to be initialized by the time it starts, and still available at the time it stops
+ *    can logically live in this stage.
+ *  - {@link Stage#ANNOUNCEMENTS}: Any object which announces to a cluster this servers location belongs in this stage.
+ *    By being last, we can be sure that all servers are initialized before we advertise the endpoint locations, and
+ *    also can be sure that we un-announce these advertisements prior to the Stage.SERVER objects stop.
+ *
  * There are two sets of methods to add things to the Lifecycle.  One set that will just add instances and enforce that
  * start() has not been called yet.  The other set will add instances and, if the lifecycle is already started, start
  * them.
@@ -57,8 +76,10 @@ public class Lifecycle
 
   public enum Stage
   {
+    INIT,
     NORMAL,
-    LAST
+    SERVER,
+    ANNOUNCEMENTS
   }
 
   private enum State
@@ -77,9 +98,17 @@ public class Lifecycle
   private final AtomicReference<State> state = new AtomicReference<>(State.NOT_STARTED);
   private Stage currStage = null;
   private final AtomicBoolean shutdownHookRegistered = new AtomicBoolean(false);
+  private final String name;
 
   public Lifecycle()
   {
+    this("anonymous");
+  }
+
+  public Lifecycle(String name)
+  {
+    Preconditions.checkArgument(StringUtils.isNotEmpty(name), "Lifecycle name must not be null or empty");
+    this.name = name;
     handlers = new TreeMap<>();
     for (Stage stage : Stage.values()) {
       handlers.put(stage, new CopyOnWriteArrayList<>());
@@ -273,7 +302,7 @@ public class Lifecycle
   {
     if (!startStopLock.tryLock()) {
       // (*) This check is why the state should be changed before startStopLock.lock() in stop(). This check allows to
-      // spot wrong use of Lifecycle instead of entering deadlock, like https://github.com/apache/incubator-druid/issues/3579.
+      // spot wrong use of Lifecycle instead of entering deadlock, like https://github.com/apache/druid/issues/3579.
       if (state.get().equals(State.STOP)) {
         throw new ISE("Cannot add a handler in the process of Lifecycle stopping");
       }
@@ -307,10 +336,12 @@ public class Lifecycle
       }
       for (Map.Entry<Stage, ? extends List<Handler>> e : handlers.entrySet()) {
         currStage = e.getKey();
+        log.info("Starting lifecycle [%s] stage [%s]", name, currStage.name());
         for (Handler handler : e.getValue()) {
           handler.start();
         }
       }
+      log.info("Successfully started lifecycle [%s]", name);
     }
     finally {
       startStopLock.unlock();
@@ -323,28 +354,32 @@ public class Lifecycle
     // a simple variable. State change before startStopLock.lock() is needed for the new state visibility during the
     // check in addMaybeStartHandler() marked by (*).
     if (!state.compareAndSet(State.RUNNING, State.STOP)) {
-      log.info("Already stopped and stop was called. Silently skipping");
+      log.info("Lifecycle [%s] already stopped and stop was called. Silently skipping", name);
       return;
     }
     startStopLock.lock();
     try {
-      RuntimeException thrown = null;
-      for (List<Handler> stageHandlers : handlers.descendingMap().values()) {
-        for (Handler handler : Lists.reverse(stageHandlers)) {
+      Exception thrown = null;
+
+      for (Stage s : handlers.navigableKeySet().descendingSet()) {
+        log.info("Stopping lifecycle [%s] stage [%s]", name, s.name());
+        for (Handler handler : Lists.reverse(handlers.get(s))) {
           try {
             handler.stop();
           }
-          catch (RuntimeException e) {
-            log.warn(e, "exception thrown when stopping %s", handler);
+          catch (Exception e) {
+            log.warn(e, "Lifecycle [%s] encountered exception while stopping %s", name, handler);
             if (thrown == null) {
               thrown = e;
+            } else {
+              thrown.addSuppressed(e);
             }
           }
         }
       }
 
       if (thrown != null) {
-        throw thrown;
+        throw new RuntimeException(thrown);
       }
     }
     finally {
@@ -362,7 +397,7 @@ public class Lifecycle
                 @Override
                 public void run()
                 {
-                  log.info("Running shutdown hook");
+                  log.info("Lifecycle [%s] running shutdown hook", name);
                   stop();
                 }
               }
@@ -401,14 +436,13 @@ public class Lifecycle
       for (Method method : o.getClass().getMethods()) {
         boolean doStart = false;
         for (Annotation annotation : method.getAnnotations()) {
-          if ("org.apache.druid.java.util.common.lifecycle.LifecycleStart".equals(annotation.annotationType()
-              .getCanonicalName())) {
+          if (LifecycleStart.class.getName().equals(annotation.annotationType().getName())) {
             doStart = true;
             break;
           }
         }
         if (doStart) {
-          log.info("Invoking start method[%s] on object[%s].", method, o);
+          log.debug("Invoking start method[%s] on object[%s].", method, o);
           method.invoke(o);
         }
       }
@@ -420,14 +454,13 @@ public class Lifecycle
       for (Method method : o.getClass().getMethods()) {
         boolean doStop = false;
         for (Annotation annotation : method.getAnnotations()) {
-          if ("org.apache.druid.java.util.common.lifecycle.LifecycleStop".equals(annotation.annotationType()
-              .getCanonicalName())) {
+          if (LifecycleStop.class.getName().equals(annotation.annotationType().getName())) {
             doStop = true;
             break;
           }
         }
         if (doStop) {
-          log.info("Invoking stop method[%s] on object[%s].", method, o);
+          log.debug("Invoking stop method[%s] on object[%s].", method, o);
           try {
             method.invoke(o);
           }

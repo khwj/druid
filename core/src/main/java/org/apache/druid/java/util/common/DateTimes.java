@@ -23,11 +23,13 @@ import io.netty.util.SuppressForbidden;
 import org.joda.time.Chronology;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
+import org.joda.time.Months;
 import org.joda.time.chrono.ISOChronology;
 import org.joda.time.format.DateTimeFormatter;
 import org.joda.time.format.ISODateTimeFormat;
 
 import java.util.TimeZone;
+import java.util.regex.Pattern;
 
 public final class DateTimes
 {
@@ -41,8 +43,18 @@ public final class DateTimes
       ISODateTimeFormat.dateTimeParser().withOffsetParsed()
   );
 
+  /**
+   * This pattern aims to match strings, produced by {@link DateTime#toString()}. It's not rigorous: it could accept
+   * some strings that couldn't be obtained by calling toString() on any {@link DateTime} object, and also it could
+   * not match some valid DateTime string. Use for heuristic purposes only.
+   */
+  public static final Pattern COMMON_DATE_TIME_PATTERN = Pattern.compile(
+      //year    month     day        hour       minute     second       millis  time zone
+      "[0-9]{4}-[01][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}(Z|[+\\-][0-9]{2}(:[0-9]{2}))"
+  );
+
   @SuppressForbidden(reason = "DateTimeZone#forID")
-  public static DateTimeZone inferTzfromString(String tzId)
+  public static DateTimeZone inferTzFromString(String tzId)
   {
     try {
       return DateTimeZone.forID(tzId);
@@ -96,7 +108,17 @@ public final class DateTimes
 
   public static DateTime of(String instant)
   {
-    return new DateTime(instant, ISOChronology.getInstanceUTC());
+    try {
+      return new DateTime(instant, ISOChronology.getInstanceUTC());
+    }
+    catch (IllegalArgumentException ex) {
+      try {
+        return new DateTime(Long.valueOf(instant), ISOChronology.getInstanceUTC());
+      }
+      catch (IllegalArgumentException ex2) {
+        throw ex;
+      }
+    }
   }
 
   public static DateTime of(
@@ -123,6 +145,14 @@ public final class DateTimes
   public static DateTime min(DateTime dt1, DateTime dt2)
   {
     return dt1.compareTo(dt2) < 0 ? dt1 : dt2;
+  }
+
+  public static int subMonths(long timestamp1, long timestamp2, DateTimeZone timeZone)
+  {
+    DateTime time1 = new DateTime(timestamp1, timeZone);
+    DateTime time2 = new DateTime(timestamp2, timeZone);
+
+    return Months.monthsBetween(time1, time2).getMonths();
   }
 
   private DateTimes()

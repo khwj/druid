@@ -24,6 +24,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.logger.Logger;
+import org.apache.druid.server.DruidNode;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -32,25 +33,28 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.function.BooleanSupplier;
 
 /**
  * Provider of {@link DruidNodeDiscovery} instances.
  */
 public abstract class DruidNodeDiscoveryProvider
 {
-  private static final Map<String, Set<NodeType>> SERVICE_TO_NODE_TYPES = ImmutableMap.of(
-      LookupNodeService.DISCOVERY_SERVICE_KEY, ImmutableSet.of(NodeType.BROKER, NodeType.HISTORICAL, NodeType.PEON),
-      DataNodeService.DISCOVERY_SERVICE_KEY, ImmutableSet.of(NodeType.HISTORICAL, NodeType.PEON),
-      WorkerNodeService.DISCOVERY_SERVICE_KEY, ImmutableSet.of(NodeType.PEON)
+  private static final Map<String, Set<NodeRole>> SERVICE_TO_NODE_TYPES = ImmutableMap.of(
+      LookupNodeService.DISCOVERY_SERVICE_KEY,
+      ImmutableSet.of(NodeRole.BROKER, NodeRole.HISTORICAL, NodeRole.PEON, NodeRole.INDEXER),
+      DataNodeService.DISCOVERY_SERVICE_KEY, ImmutableSet.of(NodeRole.HISTORICAL, NodeRole.PEON, NodeRole.INDEXER),
+      WorkerNodeService.DISCOVERY_SERVICE_KEY, ImmutableSet.of(NodeRole.MIDDLE_MANAGER, NodeRole.INDEXER)
   );
 
   private final ConcurrentHashMap<String, ServiceDruidNodeDiscovery> serviceDiscoveryMap =
       new ConcurrentHashMap<>(SERVICE_TO_NODE_TYPES.size());
 
-  /**
-   * Get DruidNodeDiscovery instance to discover nodes of given nodeType.
-   */
-  public abstract DruidNodeDiscovery getForNodeType(NodeType nodeType);
+  public abstract BooleanSupplier getForNode(DruidNode node, NodeRole nodeRole);
+
+  /** Get a {@link DruidNodeDiscovery} instance to discover nodes of the given node role. */
+  public abstract DruidNodeDiscovery getForNodeRole(NodeRole nodeRole);
 
   /**
    * Get DruidNodeDiscovery instance to discover nodes that announce given service in its metadata.
@@ -61,15 +65,15 @@ public abstract class DruidNodeDiscoveryProvider
         serviceName,
         service -> {
 
-          Set<NodeType> nodeTypesToWatch = DruidNodeDiscoveryProvider.SERVICE_TO_NODE_TYPES.get(service);
-          if (nodeTypesToWatch == null) {
+          Set<NodeRole> nodeRolesToWatch = DruidNodeDiscoveryProvider.SERVICE_TO_NODE_TYPES.get(service);
+          if (nodeRolesToWatch == null) {
             throw new IAE("Unknown service [%s].", service);
           }
-          ServiceDruidNodeDiscovery serviceDiscovery = new ServiceDruidNodeDiscovery(service, nodeTypesToWatch.size());
+          ServiceDruidNodeDiscovery serviceDiscovery = new ServiceDruidNodeDiscovery(service, nodeRolesToWatch.size());
           DruidNodeDiscovery.Listener filteringGatheringUpstreamListener =
               serviceDiscovery.filteringUpstreamListener();
-          for (NodeType nodeType : nodeTypesToWatch) {
-            getForNodeType(nodeType).registerListener(filteringGatheringUpstreamListener);
+          for (NodeRole nodeRole : nodeRolesToWatch) {
+            getForNodeRole(nodeRole).registerListener(filteringGatheringUpstreamListener);
           }
           return serviceDiscovery;
         }
@@ -81,20 +85,20 @@ public abstract class DruidNodeDiscoveryProvider
     private static final Logger log = new Logger(ServiceDruidNodeDiscovery.class);
 
     private final String service;
-    private final Map<String, DiscoveryDruidNode> nodes = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, DiscoveryDruidNode> nodes = new ConcurrentHashMap<>();
     private final Collection<DiscoveryDruidNode> unmodifiableNodes = Collections.unmodifiableCollection(nodes.values());
 
     private final List<Listener> listeners = new ArrayList<>();
 
     private final Object lock = new Object();
 
-    private int uninitializedNodeTypes;
+    private int uninitializedNodeRoles;
 
-    ServiceDruidNodeDiscovery(String service, int watchedNodeTypes)
+    ServiceDruidNodeDiscovery(String service, int watchedNodeRoles)
     {
-      Preconditions.checkArgument(watchedNodeTypes > 0);
+      Preconditions.checkArgument(watchedNodeRoles > 0);
       this.service = service;
-      this.uninitializedNodeTypes = watchedNodeTypes;
+      this.uninitializedNodeRoles = watchedNodeRoles;
     }
 
     @Override
@@ -113,7 +117,7 @@ public abstract class DruidNodeDiscoveryProvider
         if (!unmodifiableNodes.isEmpty()) {
           listener.nodesAdded(unmodifiableNodes);
         }
-        if (uninitializedNodeTypes == 0) {
+        if (uninitializedNodeRoles == 0) {
           listener.nodeViewInitialized();
         }
         listeners.add(listener);
@@ -127,7 +131,7 @@ public abstract class DruidNodeDiscoveryProvider
 
     /**
      * Listens for all node updates and filters them based on {@link #service}. Note: this listener is registered with
-     * the objects returned from {@link #getForNodeType(NodeType)}, NOT with {@link ServiceDruidNodeDiscovery} itself.
+     * the objects returned from {@link #getForNodeRole(NodeRole)}, NOT with {@link ServiceDruidNodeDiscovery} itself.
      */
     class FilteringUpstreamListener implements DruidNodeDiscovery.Listener
     {
@@ -202,12 +206,12 @@ public abstract class DruidNodeDiscoveryProvider
       public void nodeViewInitialized()
       {
         synchronized (lock) {
-          if (uninitializedNodeTypes == 0) {
+          if (uninitializedNodeRoles == 0) {
             log.error("Unexpected call of nodeViewInitialized()");
             return;
           }
-          uninitializedNodeTypes--;
-          if (uninitializedNodeTypes == 0) {
+          uninitializedNodeRoles--;
+          if (uninitializedNodeRoles == 0) {
             for (Listener listener : listeners) {
               try {
                 listener.nodeViewInitialized();

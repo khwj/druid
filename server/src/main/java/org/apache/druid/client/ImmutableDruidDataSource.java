@@ -22,33 +22,39 @@ package org.apache.druid.client;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSortedMap;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 
 import java.util.Collection;
 import java.util.Map;
-import java.util.Objects;
-import java.util.SortedMap;
 
 /**
+ * An immutable collection of metadata of segments ({@link DataSegment} objects), belonging to a particular data
+ * source.
+ *
+ * @see DruidDataSource - a mutable counterpart of this class
  */
 public class ImmutableDruidDataSource
 {
   private final String name;
   private final ImmutableMap<String, String> properties;
-  private final ImmutableSortedMap<String, DataSegment> idToSegments;
+  private final ImmutableSortedMap<SegmentId, DataSegment> idToSegments;
+  private final long totalSizeOfSegments;
 
-  public ImmutableDruidDataSource(
-      String name,
-      Map<String, String> properties,
-      SortedMap<String, DataSegment> idToSegments
-  )
+  /**
+   * Concurrency: idToSegments argument might be a {@link java.util.concurrent.ConcurrentMap} that is being updated
+   * concurrently while this constructor is executed.
+   */
+  public ImmutableDruidDataSource(String name, Map<String, String> properties, Map<SegmentId, DataSegment> idToSegments)
   {
     this.name = Preconditions.checkNotNull(name);
     this.properties = ImmutableMap.copyOf(properties);
-    this.idToSegments = ImmutableSortedMap.copyOfSorted(idToSegments);
+    this.idToSegments = ImmutableSortedMap.copyOf(idToSegments);
+    this.totalSizeOfSegments = idToSegments.values().stream().mapToLong(DataSegment::getSize).sum();
   }
 
   @JsonCreator
@@ -60,9 +66,15 @@ public class ImmutableDruidDataSource
   {
     this.name = Preconditions.checkNotNull(name);
     this.properties = ImmutableMap.copyOf(properties);
-    final ImmutableSortedMap.Builder<String, DataSegment> builder = ImmutableSortedMap.naturalOrder();
-    segments.forEach(segment -> builder.put(segment.getIdentifier(), segment));
-    this.idToSegments = builder.build();
+
+    final ImmutableSortedMap.Builder<SegmentId, DataSegment> idToSegmentsBuilder = ImmutableSortedMap.naturalOrder();
+    long totalSizeOfSegments = 0;
+    for (DataSegment segment : segments) {
+      idToSegmentsBuilder.put(segment.getId(), segment);
+      totalSizeOfSegments += segment.getSize();
+    }
+    this.idToSegments = idToSegmentsBuilder.build();
+    this.totalSizeOfSegments = totalSizeOfSegments;
   }
 
   @JsonProperty
@@ -84,9 +96,18 @@ public class ImmutableDruidDataSource
   }
 
   @JsonIgnore
-  public DataSegment getSegment(String segmentIdentifier)
+  public DataSegment getSegment(SegmentId segmentId)
   {
-    return idToSegments.get(segmentIdentifier);
+    return idToSegments.get(segmentId);
+  }
+
+  /**
+   * Returns the sum of the {@link DataSegment#getSize() sizes} of all segments in this ImmutableDruidDataSource.
+   */
+  @JsonIgnore
+  public long getTotalSizeOfSegments()
+  {
+    return totalSizeOfSegments;
   }
 
   @Override
@@ -100,8 +121,41 @@ public class ImmutableDruidDataSource
            + "'}";
   }
 
+  /**
+   * ImmutableDruidDataSource should be considered a container, not a data class. The idea is the same as behind
+   * prohibiting/limiting equals() (and therefore usage as HashSet/HashMap keys) of DataSegment: see
+   * https://github.com/apache/druid/issues/6358. When somebody wants to deduplicate ImmutableDruidDataSource
+   * objects, they would need to put them into a Map<String, ImmutableDruidDataSource> and resolve conflicts by name
+   * manually.
+   *
+   * See https://github.com/apache/druid/issues/7858
+   */
   @Override
   public boolean equals(Object o)
+  {
+    throw new UnsupportedOperationException("ImmutableDruidDataSource shouldn't be used as the key in containers");
+  }
+
+  /**
+   * ImmutableDruidDataSource should be considered a container, not a data class. The idea is the same as behind
+   * prohibiting/limiting hashCode() (and therefore usage as HashSet/HashMap keys) of DataSegment: see
+   * https://github.com/apache/druid/issues/6358. When somebody wants to deduplicate ImmutableDruidDataSource
+   * objects, they would need to put them into a Map<String, ImmutableDruidDataSource> and resolve conflicts by name
+   * manually.
+   *
+   * See https://github.com/apache/druid/issues/7858
+   */
+  @Override
+  public int hashCode()
+  {
+    throw new UnsupportedOperationException("ImmutableDruidDataSource shouldn't be used as the key in containers");
+  }
+
+  /**
+   * This method should only be used in tests.
+   */
+  @VisibleForTesting
+  public boolean equalsForTesting(Object o)
   {
     if (this == o) {
       return true;
@@ -121,11 +175,5 @@ public class ImmutableDruidDataSource
     }
 
     return this.idToSegments.equals(that.idToSegments);
-  }
-
-  @Override
-  public int hashCode()
-  {
-    return Objects.hash(name, properties, idToSegments);
   }
 }

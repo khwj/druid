@@ -25,13 +25,15 @@ import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class NoopIndexingServiceClient implements IndexingServiceClient
 {
   @Override
-  public void killSegments(String dataSource, Interval interval)
+  public void killUnusedSegments(String dataSource, Interval interval)
   {
 
   }
@@ -43,18 +45,10 @@ public class NoopIndexingServiceClient implements IndexingServiceClient
   }
 
   @Override
-  public void mergeSegments(List<DataSegment> segments)
-  {
-    
-  }
-
-  @Override
   public String compactSegments(
       List<DataSegment> segments,
-      boolean keepSegmentGranularity,
-      long targetCompactionSizeBytes,
       int compactionTaskPriority,
-      @Nullable ClientCompactQueryTuningConfig tuningConfig,
+      @Nullable ClientCompactionTaskQueryTuningConfig tuningConfig,
       @Nullable Map<String, Object> context
   )
   {
@@ -74,33 +68,27 @@ public class NoopIndexingServiceClient implements IndexingServiceClient
   }
 
   @Override
-  public String killTask(String taskId)
+  public String cancelTask(String taskId)
   {
     return null;
   }
 
   @Override
-  public List<TaskStatusPlus> getRunningTasks()
+  public List<TaskStatusPlus> getActiveTasks()
   {
-    return null;
-  }
-
-  @Override
-  public List<TaskStatusPlus> getPendingTasks()
-  {
-    return null;
-  }
-
-  @Override
-  public List<TaskStatusPlus> getWaitingTasks()
-  {
-    return null;
+    return Collections.emptyList();
   }
 
   @Override
   public TaskStatusResponse getTaskStatus(String taskId)
   {
     return new TaskStatusResponse(taskId, null);
+  }
+
+  @Override
+  public Map<String, TaskStatus> getTaskStatuses(Set<String> taskIds)
+  {
+    return Collections.emptyMap();
   }
 
   @Nullable

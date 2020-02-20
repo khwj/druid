@@ -22,7 +22,6 @@ package org.apache.druid.server.coordinator;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
-import com.google.common.base.Throwables;
 import com.google.common.collect.Iterators;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
@@ -68,13 +67,15 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class HttpLoadQueuePeon extends LoadQueuePeon
 {
-  public static final TypeReference REQUEST_ENTITY_TYPE_REF = new TypeReference<List<DataSegmentChangeRequest>>()
-  {
-  };
+  public static final TypeReference<List<DataSegmentChangeRequest>> REQUEST_ENTITY_TYPE_REF =
+      new TypeReference<List<DataSegmentChangeRequest>>()
+      {
+      };
 
-  public static final TypeReference RESPONSE_ENTITY_TYPE_REF = new TypeReference<List<SegmentLoadDropHandler.DataSegmentChangeRequestAndStatus>>()
-  {
-  };
+  public static final TypeReference<List<SegmentLoadDropHandler.DataSegmentChangeRequestAndStatus>> RESPONSE_ENTITY_TYPE_REF =
+      new TypeReference<List<SegmentLoadDropHandler.DataSegmentChangeRequestAndStatus>>()
+      {
+      };
 
   private static final EmittingLogger log = new EmittingLogger(HttpLoadQueuePeon.class);
 
@@ -82,13 +83,13 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
   private final AtomicInteger failedAssignCount = new AtomicInteger(0);
 
   private final ConcurrentSkipListMap<DataSegment, SegmentHolder> segmentsToLoad = new ConcurrentSkipListMap<>(
-      DruidCoordinator.SEGMENT_COMPARATOR
+      DruidCoordinator.SEGMENT_COMPARATOR_RECENT_FIRST
   );
   private final ConcurrentSkipListMap<DataSegment, SegmentHolder> segmentsToDrop = new ConcurrentSkipListMap<>(
-      DruidCoordinator.SEGMENT_COMPARATOR
+      DruidCoordinator.SEGMENT_COMPARATOR_RECENT_FIRST
   );
   private final ConcurrentSkipListSet<DataSegment> segmentsMarkedToDrop = new ConcurrentSkipListSet<>(
-      DruidCoordinator.SEGMENT_COMPARATOR
+      DruidCoordinator.SEGMENT_COMPARATOR_RECENT_FIRST
   );
 
   private final ScheduledExecutorService processingExecutor;
@@ -136,20 +137,20 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
       );
     }
     catch (MalformedURLException ex) {
-      throw Throwables.propagate(ex);
+      throw new RuntimeException(ex);
     }
   }
 
   private void doSegmentManagement()
   {
     if (stopped || !mainLoopInProgress.compareAndSet(false, true)) {
-      log.debug("[%s]Ignoring tick. Either in-progress already or stopped.", serverId);
+      log.trace("[%s]Ignoring tick. Either in-progress already or stopped.", serverId);
       return;
     }
 
-    int batchSize = config.getHttpLoadQueuePeonBatchSize();
+    final int batchSize = config.getHttpLoadQueuePeonBatchSize();
 
-    List<DataSegmentChangeRequest> newRequests = new ArrayList<>(batchSize);
+    final List<DataSegmentChangeRequest> newRequests = new ArrayList<>(batchSize);
 
     synchronized (lock) {
       Iterator<Map.Entry<DataSegment, SegmentHolder>> iter = Iterators.concat(
@@ -157,8 +158,7 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
           segmentsToLoad.entrySet().iterator()
       );
 
-      while (batchSize > 0 && iter.hasNext()) {
-        batchSize--;
+      while (newRequests.size() < batchSize && iter.hasNext()) {
         Map.Entry<DataSegment, SegmentHolder> entry = iter.next();
         if (entry.getValue().hasTimedOut()) {
           entry.getValue().requestFailed("timed out");
@@ -170,7 +170,7 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
     }
 
     if (newRequests.size() == 0) {
-      log.debug(
+      log.trace(
           "[%s]Found no load/drop requests. SegmentsToLoad[%d], SegmentsToDrop[%d], batchSize[%d].",
           serverId,
           segmentsToLoad.size(),
@@ -182,7 +182,7 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
     }
 
     try {
-      log.debug("Sending [%d] load/drop requests to Server[%s].", newRequests.size(), serverId);
+      log.trace("Sending [%d] load/drop requests to Server[%s].", newRequests.size(), serverId);
       BytesAccumulatingResponseHandler responseHandler = new BytesAccumulatingResponseHandler();
       ListenableFuture<InputStream> future = httpClient.go(
           new Request(HttpMethod.POST, changeRequestURL)
@@ -203,15 +203,15 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
               boolean scheduleNextRunImmediately = true;
               try {
                 if (responseHandler.getStatus() == HttpServletResponse.SC_NO_CONTENT) {
-                  log.debug("Received NO CONTENT reseponse from [%s]", serverId);
+                  log.trace("Received NO CONTENT reseponse from [%s]", serverId);
                 } else if (HttpServletResponse.SC_OK == responseHandler.getStatus()) {
                   try {
                     List<SegmentLoadDropHandler.DataSegmentChangeRequestAndStatus> statuses =
                         jsonMapper.readValue(result, RESPONSE_ENTITY_TYPE_REF);
-                    log.debug("Server[%s] returned status response [%s].", serverId, statuses);
+                    log.trace("Server[%s] returned status response [%s].", serverId, statuses);
                     synchronized (lock) {
                       if (stopped) {
-                        log.debug("Ignoring response from Server[%s]. We are already stopped.", serverId);
+                        log.trace("Ignoring response from Server[%s]. We are already stopped.", serverId);
                         scheduleNextRunImmediately = false;
                         return;
                       }
@@ -223,7 +223,7 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
                             handleResponseStatus(e.getRequest(), e.getStatus());
                             break;
                           case PENDING:
-                            log.debug("Request[%s] is still pending on server[%s].", e.getRequest(), serverId);
+                            log.trace("Request[%s] is still pending on server[%s].", e.getRequest(), serverId);
                             break;
                           default:
                             scheduleNextRunImmediately = false;
@@ -304,8 +304,7 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
               return;
             }
 
-            if (status.getState()
-                == SegmentLoadDropHandler.Status.STATE.FAILED) {
+            if (status.getState() == SegmentLoadDropHandler.Status.STATE.FAILED) {
               holder.requestFailed(status.getFailureCause());
             } else {
               holder.requestSucceeded();
@@ -374,7 +373,7 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
         log.warn(
             "Server[%s] cannot load segment[%s] because load queue peon is stopped.",
             serverId,
-            segment.getIdentifier()
+            segment.getId()
         );
         callback.execute();
         return;
@@ -383,7 +382,7 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
       SegmentHolder holder = segmentsToLoad.get(segment);
 
       if (holder == null) {
-        log.debug("Server[%s] to load segment[%s] queued.", serverId, segment.getIdentifier());
+        log.trace("Server[%s] to load segment[%s] queued.", serverId, segment.getId());
         segmentsToLoad.put(segment, new LoadSegmentHolder(segment, callback));
         processingExecutor.execute(this::doSegmentManagement);
       } else {
@@ -400,7 +399,7 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
         log.warn(
             "Server[%s] cannot drop segment[%s] because load queue peon is stopped.",
             serverId,
-            segment.getIdentifier()
+            segment.getId()
         );
         callback.execute();
         return;
@@ -408,7 +407,7 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
       SegmentHolder holder = segmentsToDrop.get(segment);
 
       if (holder == null) {
-        log.debug("Server[%s] to drop segment[%s] queued.", serverId, segment.getIdentifier());
+        log.trace("Server[%s] to drop segment[%s] queued.", serverId, segment.getId());
         segmentsToDrop.put(segment, new DropSegmentHolder(segment, callback));
         processingExecutor.execute(this::doSegmentManagement);
       } else {
@@ -521,10 +520,10 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
 
     public void requestSucceeded()
     {
-      log.debug(
+      log.trace(
           "Server[%s] Successfully processed segment[%s] request[%s].",
           serverId,
-          segment.getIdentifier(),
+          segment.getId(),
           changeRequest.getClass().getSimpleName()
       );
 
@@ -542,7 +541,7 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
       log.error(
           "Server[%s] Failed segment[%s] request[%s] with cause [%s].",
           serverId,
-          segment.getIdentifier(),
+          segment.getId(),
           changeRequest.getClass().getSimpleName(),
           failureCause
       );
@@ -578,6 +577,13 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
     {
       queuedSize.addAndGet(-getSegment().getSize());
       super.requestSucceeded();
+    }
+
+    @Override
+    public void requestFailed(String failureCause)
+    {
+      queuedSize.addAndGet(-getSegment().getSize());
+      super.requestFailed(failureCause);
     }
   }
 

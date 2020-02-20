@@ -19,12 +19,11 @@
 
 package org.apache.druid.sql.calcite.planner;
 
-import com.google.common.base.Function;
-import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.primitives.Ints;
 import org.apache.calcite.DataContext;
 import org.apache.calcite.adapter.java.JavaTypeFactory;
 import org.apache.calcite.interpreter.BindableConvention;
@@ -33,11 +32,11 @@ import org.apache.calcite.interpreter.Bindables;
 import org.apache.calcite.linq4j.Enumerable;
 import org.apache.calcite.linq4j.Enumerator;
 import org.apache.calcite.plan.RelOptPlanner;
-import org.apache.calcite.plan.RelOptTable;
 import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelRoot;
-import org.apache.calcite.rel.RelVisitor;
+import org.apache.calcite.rel.core.Sort;
+import org.apache.calcite.rel.logical.LogicalSort;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexNode;
@@ -45,29 +44,22 @@ import org.apache.calcite.sql.SqlExplain;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.parser.SqlParseException;
+import org.apache.calcite.sql.type.BasicSqlType;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.tools.Planner;
 import org.apache.calcite.tools.RelConversionException;
 import org.apache.calcite.tools.ValidationException;
 import org.apache.calcite.util.Pair;
-import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.guava.BaseSequence;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
-import org.apache.druid.server.security.Access;
-import org.apache.druid.server.security.AuthConfig;
-import org.apache.druid.server.security.AuthenticationResult;
-import org.apache.druid.server.security.AuthorizationUtils;
-import org.apache.druid.server.security.AuthorizerMapper;
-import org.apache.druid.server.security.ForbiddenException;
+import org.apache.druid.segment.DimensionHandlerUtils;
 import org.apache.druid.sql.calcite.rel.DruidConvention;
 import org.apache.druid.sql.calcite.rel.DruidRel;
 
 import javax.annotation.Nullable;
-import javax.servlet.http.HttpServletRequest;
 import java.io.Closeable;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
@@ -76,61 +68,39 @@ public class DruidPlanner implements Closeable
 {
   private final Planner planner;
   private final PlannerContext plannerContext;
-  private final AuthorizerMapper authorizerMapper;
+  private RexBuilder rexBuilder;
 
   public DruidPlanner(
       final Planner planner,
-      final PlannerContext plannerContext,
-      final AuthorizerMapper authorizerMapper
+      final PlannerContext plannerContext
   )
   {
     this.planner = planner;
     this.plannerContext = plannerContext;
-    this.authorizerMapper = authorizerMapper;
   }
 
-  public PlannerResult plan(
-      final String sql,
-      final HttpServletRequest request
-  ) throws SqlParseException, ValidationException, RelConversionException, ForbiddenException
+  public PlannerResult plan(final String sql)
+      throws SqlParseException, ValidationException, RelConversionException
   {
-    return plan(sql, Preconditions.checkNotNull(request, "request"), null);
-  }
-
-  public PlannerResult plan(
-      final String sql,
-      final AuthenticationResult authenticationResult
-  ) throws SqlParseException, ValidationException, RelConversionException, ForbiddenException
-  {
-    return plan(sql, null, Preconditions.checkNotNull(authenticationResult, "authenticationResult"));
-  }
-
-  private PlannerResult plan(
-      final String sql,
-      @Nullable final HttpServletRequest request,
-      @Nullable final AuthenticationResult authenticationResult
-  ) throws SqlParseException, ValidationException, RelConversionException, ForbiddenException
-  {
-    if (authenticationResult != null && request != null) {
-      throw new ISE("Cannot specify both 'request' and 'authenticationResult'");
-    }
-
     SqlExplain explain = null;
     SqlNode parsed = planner.parse(sql);
     if (parsed.getKind() == SqlKind.EXPLAIN) {
       explain = (SqlExplain) parsed;
       parsed = explain.getExplicandum();
     }
+    // the planner's type factory is not available until after parsing
+    this.rexBuilder = new RexBuilder(planner.getTypeFactory());
+
     final SqlNode validated = planner.validate(parsed);
     final RelRoot root = planner.rel(validated);
 
     try {
-      return planWithDruidConvention(explain, root, request, authenticationResult);
+      return planWithDruidConvention(explain, root);
     }
     catch (RelOptPlanner.CannotPlanException e) {
-      // Try again with BINDABLE convention. Used for querying Values, metadata tables, and fallback.
+      // Try again with BINDABLE convention. Used for querying Values and metadata tables.
       try {
-        return planWithBindableConvention(explain, root, request, authenticationResult);
+        return planWithBindableConvention(explain, root);
       }
       catch (Exception e2) {
         e.addSuppressed(e2);
@@ -152,130 +122,49 @@ public class DruidPlanner implements Closeable
 
   private PlannerResult planWithDruidConvention(
       final SqlExplain explain,
-      final RelRoot root,
-      @Nullable final HttpServletRequest request,
-      @Nullable final AuthenticationResult authenticationResult
-  ) throws RelConversionException, ForbiddenException
+      final RelRoot root
+  ) throws RelConversionException
   {
+    final RelNode possiblyWrappedRootRel = possiblyWrapRootWithOuterLimitFromContext(root);
+
     final DruidRel<?> druidRel = (DruidRel<?>) planner.transform(
         Rules.DRUID_CONVENTION_RULES,
         planner.getEmptyTraitSet()
                .replace(DruidConvention.instance())
                .plus(root.collation),
-        root.rel
+        possiblyWrappedRootRel
     );
 
-    List<String> datasourceNames = druidRel.getDatasourceNames();
-    // we'll eventually run a second authorization check at QueryLifecycle.runSimple(), so store the
-    // authentication result in the planner context.
-    Access authResult;
-    if (request != null) {
-      authResult = AuthorizationUtils.authorizeAllResourceActions(
-          request,
-          Iterables.transform(datasourceNames, AuthorizationUtils.DATASOURCE_READ_RA_GENERATOR),
-          authorizerMapper
-      );
-      plannerContext.setAuthenticationResult(
-          (AuthenticationResult) request.getAttribute(AuthConfig.DRUID_AUTHENTICATION_RESULT)
-      );
-    } else {
-      authResult = AuthorizationUtils.authorizeAllResourceActions(
-          authenticationResult,
-          Iterables.transform(datasourceNames, AuthorizationUtils.DATASOURCE_READ_RA_GENERATOR),
-          authorizerMapper
-      );
-      plannerContext.setAuthenticationResult(authenticationResult);
-    }
-
-    if (!authResult.isAllowed()) {
-      throw new ForbiddenException(authResult.toString());
-    }
+    final Set<String> dataSourceNames = ImmutableSet.copyOf(druidRel.getDataSourceNames());
 
     if (explain != null) {
-      return planExplanation(druidRel, explain);
+      return planExplanation(druidRel, explain, dataSourceNames);
     } else {
-      final Supplier<Sequence<Object[]>> resultsSupplier = new Supplier<Sequence<Object[]>>()
-      {
-        @Override
-        public Sequence<Object[]> get()
-        {
-          if (root.isRefTrivial()) {
-            return druidRel.runQuery();
-          } else {
-            // Add a mapping on top to accommodate root.fields.
-            return Sequences.map(
-                druidRel.runQuery(),
-                new Function<Object[], Object[]>()
-                {
-                  @Override
-                  public Object[] apply(final Object[] input)
-                  {
-                    final Object[] retVal = new Object[root.fields.size()];
-                    for (int i = 0; i < root.fields.size(); i++) {
-                      retVal[i] = input[root.fields.get(i).getKey()];
-                    }
-                    return retVal;
-                  }
+      final Supplier<Sequence<Object[]>> resultsSupplier = () -> {
+        if (root.isRefTrivial()) {
+          return druidRel.runQuery();
+        } else {
+          // Add a mapping on top to accommodate root.fields.
+          return Sequences.map(
+              druidRel.runQuery(),
+              input -> {
+                final Object[] retVal = new Object[root.fields.size()];
+                for (int i = 0; i < root.fields.size(); i++) {
+                  retVal[i] = input[root.fields.get(i).getKey()];
                 }
-            );
-          }
+                return retVal;
+              }
+          );
         }
       };
-      return new PlannerResult(resultsSupplier, root.validatedRowType);
-    }
-  }
 
-  private Access authorizeBindableRel(
-      BindableRel rel,
-      final PlannerContext plannerContext,
-      HttpServletRequest req,
-      final AuthenticationResult authenticationResult
-  )
-  {
-    Set<String> datasourceNames = new HashSet<>();
-    rel.childrenAccept(
-        new RelVisitor()
-        {
-          @Override
-          public void visit(RelNode node, int ordinal, RelNode parent)
-          {
-            if (node instanceof DruidRel) {
-              datasourceNames.addAll(((DruidRel) node).getDatasourceNames());
-            }
-            if (node instanceof Bindables.BindableTableScan) {
-              Bindables.BindableTableScan bts = (Bindables.BindableTableScan) node;
-              RelOptTable table = bts.getTable();
-              String tableName = table.getQualifiedName().get(0);
-              datasourceNames.add(tableName);
-            }
-            node.childrenAccept(this);
-          }
-        }
-    );
-    if (req != null) {
-      plannerContext.setAuthenticationResult(
-          (AuthenticationResult) req.getAttribute(AuthConfig.DRUID_AUTHENTICATION_RESULT)
-      );
-      return AuthorizationUtils.authorizeAllResourceActions(
-          req,
-          Iterables.transform(datasourceNames, AuthorizationUtils.DATASOURCE_READ_RA_GENERATOR),
-          authorizerMapper
-      );
-    } else {
-      plannerContext.setAuthenticationResult(authenticationResult);
-      return AuthorizationUtils.authorizeAllResourceActions(
-          authenticationResult,
-          Iterables.transform(datasourceNames, AuthorizationUtils.DATASOURCE_READ_RA_GENERATOR),
-          authorizerMapper
-      );
+      return new PlannerResult(resultsSupplier, root.validatedRowType, dataSourceNames);
     }
   }
 
   private PlannerResult planWithBindableConvention(
       final SqlExplain explain,
-      final RelRoot root,
-      final HttpServletRequest request,
-      final AuthenticationResult authenticationResult
+      final RelRoot root
   ) throws RelConversionException
   {
     BindableRel bindableRel = (BindableRel) planner.transform(
@@ -302,13 +191,8 @@ public class DruidPlanner implements Closeable
       );
     }
 
-    Access accessResult = authorizeBindableRel(bindableRel, plannerContext, request, authenticationResult);
-    if (!accessResult.isAllowed()) {
-      throw new ForbiddenException(accessResult.toString());
-    }
-
     if (explain != null) {
-      return planExplanation(bindableRel, explain);
+      return planExplanation(bindableRel, explain, ImmutableSet.of());
     } else {
       final BindableRel theRel = bindableRel;
       final DataContext dataContext = plannerContext.createDataContext((JavaTypeFactory) planner.getTypeFactory());
@@ -319,9 +203,9 @@ public class DruidPlanner implements Closeable
             new BaseSequence.IteratorMaker<Object[], EnumeratorIterator<Object[]>>()
             {
               @Override
-              public EnumeratorIterator make()
+              public EnumeratorIterator<Object[]> make()
               {
-                return new EnumeratorIterator(new Iterator<Object[]>()
+                return new EnumeratorIterator<>(new Iterator<Object[]>()
                 {
                   @Override
                   public boolean hasNext()
@@ -343,17 +227,78 @@ public class DruidPlanner implements Closeable
 
               }
             }
-        ), () -> enumerator.close());
+        ), enumerator::close);
       };
-      return new PlannerResult(resultsSupplier, root.validatedRowType);
+      return new PlannerResult(resultsSupplier, root.validatedRowType, ImmutableSet.of());
     }
+  }
+
+  /**
+   * This method wraps the root with a {@link LogicalSort} that applies a limit (no ordering change). If the outer rel
+   * is already a {@link Sort}, we can merge our outerLimit into it, similar to what is going on in
+   * {@link org.apache.druid.sql.calcite.rule.SortCollapseRule}.
+   *
+   * The {@link PlannerContext#CTX_SQL_OUTER_LIMIT} flag that controls this wrapping is meant for internal use only by
+   * the web console, allowing it to apply a limit to queries without rewriting the original SQL.
+   *
+   * @param root root node
+   * @return root node wrapped with a limiting logical sort if a limit is specified in the query context.
+   */
+  @Nullable
+  private RelNode possiblyWrapRootWithOuterLimitFromContext(
+      RelRoot root
+  )
+  {
+    Object outerLimitObj = plannerContext.getQueryContext().get(PlannerContext.CTX_SQL_OUTER_LIMIT);
+    Long outerLimit = DimensionHandlerUtils.convertObjectToLong(outerLimitObj, true);
+    if (outerLimit == null) {
+      return root.rel;
+    }
+
+    if (root.rel instanceof Sort) {
+      Sort innerSort = (Sort) root.rel;
+      final int offset = Calcites.getOffset(innerSort);
+      final int innerLimit = Calcites.getFetch(innerSort);
+      final int fetch = Calcites.collapseFetch(
+          innerLimit,
+          Ints.checkedCast(outerLimit),
+          0
+      );
+
+      if (fetch == innerLimit) {
+        // nothing to do, don't bother to make a new sort
+        return root.rel;
+      }
+
+      return LogicalSort.create(
+          innerSort.getInput(),
+          innerSort.collation,
+          offset > 0 ? makeBigIntLiteral(offset) : null,
+          makeBigIntLiteral(fetch)
+      );
+    }
+    return LogicalSort.create(
+        root.rel,
+        root.collation,
+        null,
+        makeBigIntLiteral(outerLimit)
+    );
+  }
+
+  private RexNode makeBigIntLiteral(long value)
+  {
+    return rexBuilder.makeLiteral(
+        value,
+        new BasicSqlType(DruidTypeSystem.INSTANCE, SqlTypeName.BIGINT),
+        false
+    );
   }
 
   private static class EnumeratorIterator<T> implements Iterator<T>
   {
     private final Iterator<T> it;
 
-    public EnumeratorIterator(Iterator<T> it)
+    EnumeratorIterator(Iterator<T> it)
     {
       this.it = it;
     }
@@ -373,7 +318,8 @@ public class DruidPlanner implements Closeable
 
   private PlannerResult planExplanation(
       final RelNode rel,
-      final SqlExplain explain
+      final SqlExplain explain,
+      final Set<String> datasourceNames
   )
   {
     final String explanation = RelOptUtil.dumpPlan("", rel, explain.getFormat(), explain.getDetailLevel());
@@ -385,7 +331,8 @@ public class DruidPlanner implements Closeable
         typeFactory.createStructType(
             ImmutableList.of(Calcites.createSqlType(typeFactory, SqlTypeName.VARCHAR)),
             ImmutableList.of("PLAN")
-        )
+        ),
+        datasourceNames
     );
   }
 }

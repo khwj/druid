@@ -22,10 +22,18 @@ package org.apache.druid.query.aggregation.datasketches.hll;
 import com.fasterxml.jackson.databind.Module;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.fasterxml.jackson.databind.module.SimpleModule;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.inject.Binder;
-import com.yahoo.sketches.hll.HllSketch;
+import org.apache.datasketches.hll.HllSketch;
 import org.apache.druid.initialization.DruidModule;
+import org.apache.druid.query.aggregation.datasketches.hll.sql.HllSketchApproxCountDistinctSqlAggregator;
+import org.apache.druid.query.aggregation.datasketches.hll.sql.HllSketchEstimateOperatorConversion;
+import org.apache.druid.query.aggregation.datasketches.hll.sql.HllSketchEstimateWithErrorBoundsOperatorConversion;
+import org.apache.druid.query.aggregation.datasketches.hll.sql.HllSketchObjectSqlAggregator;
+import org.apache.druid.query.aggregation.datasketches.hll.sql.HllSketchSetUnionOperatorConversion;
+import org.apache.druid.query.aggregation.datasketches.hll.sql.HllSketchToStringOperatorConversion;
 import org.apache.druid.segment.serde.ComplexMetrics;
+import org.apache.druid.sql.guice.SqlBindings;
 
 import java.util.Collections;
 import java.util.List;
@@ -33,7 +41,6 @@ import java.util.List;
 /**
  * This module is to support count-distinct operations using {@link HllSketch}.
  * See <a href="https://datasketches.github.io/docs/HLL/HLL.html">HyperLogLog Sketch documentation</a>
- * @author Alexander Saydakov
  */
 public class HllSketchModule implements DruidModule
 {
@@ -44,19 +51,20 @@ public class HllSketchModule implements DruidModule
   public static final String TO_STRING_TYPE_NAME = "HLLSketchToString";
   public static final String UNION_TYPE_NAME = "HLLSketchUnion";
   public static final String ESTIMATE_WITH_BOUNDS_TYPE_NAME = "HLLSketchEstimateWithBounds";
+  public static final String ESTIMATE_TYPE_NAME = "HLLSketchEstimate";
+
 
   @Override
   public void configure(final Binder binder)
   {
-    if (ComplexMetrics.getSerdeForType(TYPE_NAME) == null) {
-      ComplexMetrics.registerSerde(TYPE_NAME, new HllSketchMergeComplexMetricSerde());
-    }
-    if (ComplexMetrics.getSerdeForType(BUILD_TYPE_NAME) == null) {
-      ComplexMetrics.registerSerde(BUILD_TYPE_NAME, new HllSketchBuildComplexMetricSerde());
-    }
-    if (ComplexMetrics.getSerdeForType(MERGE_TYPE_NAME) == null) {
-      ComplexMetrics.registerSerde(MERGE_TYPE_NAME, new HllSketchMergeComplexMetricSerde());
-    }
+    registerSerde();
+    SqlBindings.addAggregator(binder, HllSketchApproxCountDistinctSqlAggregator.class);
+    SqlBindings.addAggregator(binder, HllSketchObjectSqlAggregator.class);
+
+    SqlBindings.addOperatorConversion(binder, HllSketchEstimateOperatorConversion.class);
+    SqlBindings.addOperatorConversion(binder, HllSketchEstimateWithErrorBoundsOperatorConversion.class);
+    SqlBindings.addOperatorConversion(binder, HllSketchSetUnionOperatorConversion.class);
+    SqlBindings.addOperatorConversion(binder, HllSketchToStringOperatorConversion.class);
   }
 
   @Override
@@ -69,9 +77,17 @@ public class HllSketchModule implements DruidModule
             new NamedType(HllSketchMergeAggregatorFactory.class, TYPE_NAME),
             new NamedType(HllSketchToStringPostAggregator.class, TO_STRING_TYPE_NAME),
             new NamedType(HllSketchUnionPostAggregator.class, UNION_TYPE_NAME),
-            new NamedType(HllSketchToEstimateWithBoundsPostAggregator.class, ESTIMATE_WITH_BOUNDS_TYPE_NAME)
+            new NamedType(HllSketchToEstimateWithBoundsPostAggregator.class, ESTIMATE_WITH_BOUNDS_TYPE_NAME),
+            new NamedType(HllSketchToEstimatePostAggregator.class, ESTIMATE_TYPE_NAME)
         ).addSerializer(HllSketch.class, new HllSketchJsonSerializer())
     );
   }
 
+  @VisibleForTesting
+  public static void registerSerde()
+  {
+    ComplexMetrics.registerSerde(TYPE_NAME, new HllSketchMergeComplexMetricSerde());
+    ComplexMetrics.registerSerde(BUILD_TYPE_NAME, new HllSketchBuildComplexMetricSerde());
+    ComplexMetrics.registerSerde(MERGE_TYPE_NAME, new HllSketchMergeComplexMetricSerde());
+  }
 }

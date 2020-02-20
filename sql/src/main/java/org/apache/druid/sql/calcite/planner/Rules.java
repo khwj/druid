@@ -30,6 +30,7 @@ import org.apache.calcite.plan.volcano.AbstractConverter;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.RelFactories;
 import org.apache.calcite.rel.metadata.DefaultRelMetadataProvider;
+import org.apache.calcite.rel.rules.AggregateCaseToFilterRule;
 import org.apache.calcite.rel.rules.AggregateExpandDistinctAggregatesRule;
 import org.apache.calcite.rel.rules.AggregateJoinTransposeRule;
 import org.apache.calcite.rel.rules.AggregateProjectMergeRule;
@@ -71,8 +72,6 @@ import org.apache.calcite.tools.Program;
 import org.apache.calcite.tools.Programs;
 import org.apache.calcite.tools.RelBuilder;
 import org.apache.druid.sql.calcite.rel.QueryMaker;
-import org.apache.druid.sql.calcite.rule.CaseFilteredAggregatorRule;
-import org.apache.druid.sql.calcite.rule.DruidRelToBindableRule;
 import org.apache.druid.sql.calcite.rule.DruidRelToDruidRule;
 import org.apache.druid.sql.calcite.rule.DruidRules;
 import org.apache.druid.sql.calcite.rule.DruidSemiJoinRule;
@@ -102,7 +101,7 @@ public class Rules
           JoinPushExpressionsRule.INSTANCE,
           FilterAggregateTransposeRule.INSTANCE,
           ProjectWindowTransposeRule.INSTANCE,
-          JoinCommuteRule.INSTANCE,
+          JoinCommuteRule.SWAP_OUTER,
           JoinPushThroughJoinRule.RIGHT,
           JoinPushThroughJoinRule.LEFT,
           SortProjectTransposeRule.INSTANCE,
@@ -131,13 +130,13 @@ public class Rules
           AggregateValuesRule.INSTANCE
       );
 
-  // Rules from VolcanoPlanner's registerAbstractRelationalRules.
+  // Rules from VolcanoPlanner's registerAbstractRelationalRules, minus JoinCommuteRule since it's already
+  // in DEFAULT_RULES.
   private static final List<RelOptRule> VOLCANO_ABSTRACT_RULES =
       ImmutableList.of(
           FilterJoinRule.FILTER_ON_JOIN,
           FilterJoinRule.JOIN,
           AbstractConverter.ExpandConversionRule.INSTANCE,
-          JoinCommuteRule.INSTANCE,
           AggregateRemoveRule.INSTANCE,
           UnionToDistinctRule.INSTANCE,
           ProjectRemoveRule.INSTANCE,
@@ -187,7 +186,7 @@ public class Rules
         );
     return ImmutableList.of(
         Programs.sequence(hepProgram, Programs.ofRules(druidConventionRuleSet(plannerContext, queryMaker))),
-        Programs.sequence(hepProgram, Programs.ofRules(bindableConventionRuleSet(plannerContext, queryMaker)))
+        Programs.sequence(hepProgram, Programs.ofRules(bindableConventionRuleSet(plannerContext)))
     );
   }
 
@@ -196,28 +195,29 @@ public class Rules
       final QueryMaker queryMaker
   )
   {
-    return ImmutableList.<RelOptRule>builder()
-        .addAll(baseRuleSet(plannerContext, queryMaker))
+    final ImmutableList.Builder<RelOptRule> retVal = ImmutableList.<RelOptRule>builder()
+        .addAll(baseRuleSet(plannerContext))
         .add(DruidRelToDruidRule.instance())
-        .build();
+        .add(new DruidTableScanRule(queryMaker))
+        .addAll(DruidRules.rules());
+
+    if (plannerContext.getPlannerConfig().getMaxSemiJoinRowsInMemory() > 0) {
+      retVal.add(DruidSemiJoinRule.instance());
+    }
+
+    return retVal.build();
   }
 
-  private static List<RelOptRule> bindableConventionRuleSet(
-      final PlannerContext plannerContext,
-      final QueryMaker queryMaker
-  )
+  private static List<RelOptRule> bindableConventionRuleSet(final PlannerContext plannerContext)
   {
     return ImmutableList.<RelOptRule>builder()
-        .addAll(baseRuleSet(plannerContext, queryMaker))
+        .addAll(baseRuleSet(plannerContext))
         .addAll(Bindables.RULES)
         .add(AggregateReduceFunctionsRule.INSTANCE)
         .build();
   }
 
-  private static List<RelOptRule> baseRuleSet(
-      final PlannerContext plannerContext,
-      final QueryMaker queryMaker
-  )
+  private static List<RelOptRule> baseRuleSet(final PlannerContext plannerContext)
   {
     final PlannerConfig plannerConfig = plannerContext.getPlannerConfig();
     final ImmutableList.Builder<RelOptRule> rules = ImmutableList.builder();
@@ -236,21 +236,9 @@ public class Rules
       rules.add(AggregateExpandDistinctAggregatesRule.JOIN);
     }
 
-    if (plannerConfig.isUseFallback()) {
-      rules.add(DruidRelToBindableRule.instance());
-    }
-
     rules.add(SortCollapseRule.instance());
-    rules.add(CaseFilteredAggregatorRule.instance());
+    rules.add(AggregateCaseToFilterRule.INSTANCE);
     rules.add(ProjectAggregatePruneUnusedCallRule.instance());
-
-    // Druid-specific rules.
-    rules.add(new DruidTableScanRule(queryMaker));
-    rules.addAll(DruidRules.rules());
-
-    if (plannerConfig.getMaxSemiJoinRowsInMemory() > 0) {
-      rules.add(DruidSemiJoinRule.instance());
-    }
 
     return rules.build();
   }

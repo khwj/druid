@@ -37,8 +37,15 @@ import java.util.Set;
  */
 public class LifecycleModule implements Module
 {
-  private final LifecycleScope scope = new LifecycleScope(Lifecycle.Stage.NORMAL);
-  private final LifecycleScope lastScope = new LifecycleScope(Lifecycle.Stage.LAST);
+  /**
+   * This scope includes final logging shutdown, so all other handlers in this lifecycle scope should avoid logging in
+   * their stop() method, either failing silently or failing violently and throwing an exception causing an ungraceful
+   * exit.
+   */
+  private final LifecycleScope initScope = new LifecycleScope(Lifecycle.Stage.INIT);
+  private final LifecycleScope normalScope = new LifecycleScope(Lifecycle.Stage.NORMAL);
+  private final LifecycleScope serverScope = new LifecycleScope(Lifecycle.Stage.SERVER);
+  private final LifecycleScope annoucementsScope = new LifecycleScope(Lifecycle.Stage.ANNOUNCEMENTS);
 
   /**
    * Registers a class to instantiate eagerly.  Classes mentioned here will be pulled out of
@@ -53,7 +60,7 @@ public class LifecycleModule implements Module
    * it is not clear which is actually the best approach.  This is more explicit, but eager bindings inside of modules
    * is less error-prone.
    *
-   * @param clazz, the class to instantiate
+   * @param clazz the class to instantiate
    * @return this, for chaining.
    */
   public static void register(Binder binder, Class<?> clazz)
@@ -74,7 +81,7 @@ public class LifecycleModule implements Module
    * it is not clear which is actually the best approach.  This is more explicit, but eager bindings inside of modules
    * is less error-prone.
    *
-   * @param clazz, the class to instantiate
+   * @param clazz the class to instantiate
    * @param annotation The annotation class to register with Guice
    * @return this, for chaining
    */
@@ -113,8 +120,10 @@ public class LifecycleModule implements Module
   {
     getEagerBinder(binder); // Load up the eager binder so that it will inject the empty set at a minimum.
 
-    binder.bindScope(ManageLifecycle.class, scope);
-    binder.bindScope(ManageLifecycleLast.class, lastScope);
+    binder.bindScope(ManageLifecycleInit.class, initScope);
+    binder.bindScope(ManageLifecycle.class, normalScope);
+    binder.bindScope(ManageLifecycleServer.class, serverScope);
+    binder.bindScope(ManageLifecycleAnnouncements.class, annoucementsScope);
   }
 
   @Provides @LazySingleton
@@ -123,7 +132,7 @@ public class LifecycleModule implements Module
     final Key<Set<KeyHolder>> keyHolderKey = Key.get(new TypeLiteral<Set<KeyHolder>>(){}, Names.named("lifecycle"));
     final Set<KeyHolder> eagerClasses = injector.getInstance(keyHolderKey);
 
-    Lifecycle lifecycle = new Lifecycle()
+    Lifecycle lifecycle = new Lifecycle("module")
     {
       @Override
       public void start() throws Exception
@@ -134,8 +143,10 @@ public class LifecycleModule implements Module
         super.start();
       }
     };
-    scope.setLifecycle(lifecycle);
-    lastScope.setLifecycle(lifecycle);
+    initScope.setLifecycle(lifecycle);
+    normalScope.setLifecycle(lifecycle);
+    serverScope.setLifecycle(lifecycle);
+    annoucementsScope.setLifecycle(lifecycle);
 
     return lifecycle;
   }

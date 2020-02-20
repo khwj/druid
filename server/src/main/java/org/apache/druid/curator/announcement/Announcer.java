@@ -20,7 +20,6 @@
 package org.apache.druid.curator.announcement;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Throwables;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.api.transaction.CuratorTransaction;
 import org.apache.curator.framework.api.transaction.CuratorTransactionFinal;
@@ -105,7 +104,7 @@ public class Announcer
   @LifecycleStart
   public void start()
   {
-    log.info("Starting announcer");
+    log.debug("Starting Announcer.");
     synchronized (toAnnounce) {
       if (started) {
         return;
@@ -128,7 +127,7 @@ public class Announcer
   @LifecycleStop
   public void stop()
   {
-    log.info("Stopping announcer");
+    log.debug("Stopping Announcer.");
     synchronized (toAnnounce) {
       if (!started) {
         return;
@@ -326,7 +325,7 @@ public class Announcer
         createAnnouncement(path, bytes);
       }
       catch (Exception e) {
-        throw Throwables.propagate(e);
+        throw new RuntimeException(e);
       }
     }
   }
@@ -362,7 +361,7 @@ public class Announcer
         }
       }
       catch (Exception e) {
-        throw Throwables.propagate(e);
+        throw new RuntimeException(e);
       }
     }
   }
@@ -387,25 +386,25 @@ public class Announcer
    */
   public void unannounce(String path)
   {
-    log.info("unannouncing [%s]", path);
     final ZKPaths.PathAndNode pathAndNode = ZKPaths.getPathAndNode(path);
     final String parentPath = pathAndNode.getPath();
 
     final ConcurrentMap<String, byte[]> subPaths = announcements.get(parentPath);
 
     if (subPaths == null || subPaths.remove(pathAndNode.getNode()) == null) {
-      log.error("Path[%s] not announced, cannot unannounce.", path);
+      log.debug("Path[%s] not announced, cannot unannounce.", path);
       return;
     }
+    log.info("Unannouncing [%s]", path);
 
     try {
       curator.inTransaction().delete().forPath(path).and().commit();
     }
     catch (KeeperException.NoNodeException e) {
-      log.info("node[%s] didn't exist anyway...", path);
+      log.info("Node[%s] didn't exist anyway...", path);
     }
     catch (Exception e) {
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -416,7 +415,7 @@ public class Announcer
     }
     catch (Exception e) {
       CloseQuietly.close(cache);
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 

@@ -26,7 +26,6 @@ import com.google.common.collect.Maps;
 import com.google.inject.Inject;
 import com.sun.jersey.spi.container.ResourceFilters;
 import org.apache.druid.client.DruidDataSource;
-import org.apache.druid.client.DruidServer;
 import org.apache.druid.client.FilteredServerInventoryView;
 import org.apache.druid.client.ServerViewUtil;
 import org.apache.druid.client.TimelineServerView;
@@ -38,6 +37,7 @@ import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.query.LocatedSegmentDescriptor;
 import org.apache.druid.query.TableDataSource;
 import org.apache.druid.query.metadata.SegmentMetadataQueryConfig;
+import org.apache.druid.query.planning.DataSourceAnalysis;
 import org.apache.druid.server.http.security.DatasourceResourceFilter;
 import org.apache.druid.server.security.AuthConfig;
 import org.apache.druid.server.security.AuthorizationUtils;
@@ -62,14 +62,17 @@ import javax.ws.rs.core.MediaType;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
+ *
  */
 @Path("/druid/v2/datasources")
 public class ClientInfoResource
@@ -102,21 +105,6 @@ public class ClientInfoResource
     this.authorizerMapper = authorizerMapper;
   }
 
-  private Map<String, List<DataSegment>> getSegmentsForDatasources()
-  {
-    final Map<String, List<DataSegment>> dataSourceMap = new HashMap<>();
-    for (DruidServer server : serverInventoryView.getInventory()) {
-      for (DruidDataSource dataSource : server.getDataSources()) {
-        if (!dataSourceMap.containsKey(dataSource.getName())) {
-          dataSourceMap.put(dataSource.getName(), new ArrayList<>());
-        }
-        List<DataSegment> segments = dataSourceMap.get(dataSource.getName());
-        segments.addAll(dataSource.getSegments());
-      }
-    }
-    return dataSourceMap;
-  }
-
   @GET
   @Produces(MediaType.APPLICATION_JSON)
   public Iterable<String> getDataSources(@Context final HttpServletRequest request)
@@ -127,10 +115,19 @@ public class ClientInfoResource
 
     return AuthorizationUtils.filterAuthorizedResources(
         request,
-        getSegmentsForDatasources().keySet(),
+        getAllDataSources(),
         raGenerator,
         authorizerMapper
     );
+  }
+
+  private Set<String> getAllDataSources()
+  {
+    return serverInventoryView
+        .getInventory()
+        .stream()
+        .flatMap(server -> server.getDataSources().stream().map(DruidDataSource::getName))
+        .collect(Collectors.toSet());
   }
 
   @GET
@@ -145,8 +142,8 @@ public class ClientInfoResource
   {
     if (full == null) {
       return ImmutableMap.of(
-          KEY_DIMENSIONS, getDatasourceDimensions(dataSourceName, interval),
-          KEY_METRICS, getDatasourceMetrics(dataSourceName, interval)
+          KEY_DIMENSIONS, getDataSourceDimensions(dataSourceName, interval),
+          KEY_METRICS, getDataSourceMetrics(dataSourceName, interval)
       );
     }
 
@@ -158,12 +155,12 @@ public class ClientInfoResource
       theInterval = Intervals.of(interval);
     }
 
-    TimelineLookup<String, ServerSelector> timeline = timelineServerView.getTimeline(new TableDataSource(dataSourceName));
-    Iterable<TimelineObjectHolder<String, ServerSelector>> serversLookup = timeline != null ? timeline.lookup(
-        theInterval
-    ) : null;
-    if (serversLookup == null || Iterables.isEmpty(serversLookup)) {
-      return Collections.EMPTY_MAP;
+    final Optional<? extends TimelineLookup<String, ServerSelector>> maybeTimeline =
+        timelineServerView.getTimeline(DataSourceAnalysis.forDataSource(new TableDataSource(dataSourceName)));
+    final Optional<Iterable<TimelineObjectHolder<String, ServerSelector>>> maybeServersLookup =
+        maybeTimeline.map(timeline -> timeline.lookup(theInterval));
+    if (!maybeServersLookup.isPresent() || Iterables.isEmpty(maybeServersLookup.get())) {
+      return Collections.emptyMap();
     }
     Map<Interval, Object> servedIntervals = new TreeMap<>(
         new Comparator<Interval>()
@@ -180,7 +177,7 @@ public class ClientInfoResource
         }
     );
 
-    for (TimelineObjectHolder<String, ServerSelector> holder : serversLookup) {
+    for (TimelineObjectHolder<String, ServerSelector> holder : maybeServersLookup.get()) {
       final Set<Object> dimensions = new HashSet<>();
       final Set<Object> metrics = new HashSet<>();
       final PartitionHolder<ServerSelector> partitionHolder = holder.getObject();
@@ -226,19 +223,14 @@ public class ClientInfoResource
   @Path("/{dataSourceName}/dimensions")
   @Produces(MediaType.APPLICATION_JSON)
   @ResourceFilters(DatasourceResourceFilter.class)
-  public Iterable<String> getDatasourceDimensions(
+  public Iterable<String> getDataSourceDimensions(
       @PathParam("dataSourceName") String dataSourceName,
       @QueryParam("interval") String interval
   )
   {
-    final List<DataSegment> segments = getSegmentsForDatasources().get(dataSourceName);
-    final Set<String> dims = new HashSet<>();
+    final Set<DataSegment> segments = getAllSegmentsForDataSource(dataSourceName);
 
-    if (segments == null || segments.isEmpty()) {
-      return dims;
-    }
-
-    Interval theInterval;
+    final Interval theInterval;
     if (interval == null || interval.isEmpty()) {
       DateTime now = getCurrentTime();
       theInterval = new Interval(segmentMetadataQueryConfig.getDefaultHistory(), now);
@@ -246,6 +238,7 @@ public class ClientInfoResource
       theInterval = Intervals.of(interval);
     }
 
+    final Set<String> dims = new HashSet<>();
     for (DataSegment segment : segments) {
       if (theInterval.overlaps(segment.getInterval())) {
         dims.addAll(segment.getDimensions());
@@ -260,19 +253,14 @@ public class ClientInfoResource
   @Path("/{dataSourceName}/metrics")
   @Produces(MediaType.APPLICATION_JSON)
   @ResourceFilters(DatasourceResourceFilter.class)
-  public Iterable<String> getDatasourceMetrics(
+  public Iterable<String> getDataSourceMetrics(
       @PathParam("dataSourceName") String dataSourceName,
       @QueryParam("interval") String interval
   )
   {
-    final List<DataSegment> segments = getSegmentsForDatasources().get(dataSourceName);
-    final Set<String> metrics = new HashSet<>();
+    final Set<DataSegment> segments = getAllSegmentsForDataSource(dataSourceName);
 
-    if (segments == null || segments.isEmpty()) {
-      return metrics;
-    }
-
-    Interval theInterval;
+    final Interval theInterval;
     if (interval == null || interval.isEmpty()) {
       DateTime now = getCurrentTime();
       theInterval = new Interval(segmentMetadataQueryConfig.getDefaultHistory(), now);
@@ -280,6 +268,7 @@ public class ClientInfoResource
       theInterval = Intervals.of(interval);
     }
 
+    final Set<String> metrics = new HashSet<>();
     for (DataSegment segment : segments) {
       if (theInterval.overlaps(segment.getInterval())) {
         metrics.addAll(segment.getMetrics());
@@ -287,6 +276,21 @@ public class ClientInfoResource
     }
 
     return metrics;
+  }
+
+  private Set<DataSegment> getAllSegmentsForDataSource(String dataSourceName)
+  {
+    return serverInventoryView
+        .getInventory()
+        .stream()
+        .flatMap(server -> {
+          DruidDataSource dataSource = server.getDataSource(dataSourceName);
+          if (dataSource == null) {
+            return Stream.empty();
+          }
+          return dataSource.getSegments().stream();
+        })
+        .collect(Collectors.toSet());
   }
 
   @GET

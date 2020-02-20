@@ -21,7 +21,6 @@ package org.apache.druid.sql.calcite.rel;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.FluentIterable;
-import org.apache.calcite.interpreter.BindableConvention;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptCost;
 import org.apache.calcite.plan.RelOptPlanner;
@@ -38,6 +37,7 @@ import org.apache.druid.java.util.common.guava.Sequences;
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class DruidUnionRel extends DruidRel<DruidUnionRel>
@@ -129,19 +129,6 @@ public class DruidUnionRel extends DruidRel<DruidUnionRel>
   }
 
   @Override
-  public DruidUnionRel asBindable()
-  {
-    return new DruidUnionRel(
-        getCluster(),
-        getTraitSet().replace(BindableConvention.INSTANCE),
-        getQueryMaker(),
-        rowType,
-        rels.stream().map(rel -> RelOptRule.convert(rel, BindableConvention.INSTANCE)).collect(Collectors.toList()),
-        limit
-    );
-  }
-
-  @Override
   public DruidUnionRel asDruidConvention()
   {
     return new DruidUnionRel(
@@ -180,12 +167,11 @@ public class DruidUnionRel extends DruidRel<DruidUnionRel>
   }
 
   @Override
-  public List<String> getDatasourceNames()
+  public Set<String> getDataSourceNames()
   {
     return rels.stream()
-               .flatMap(rel -> ((DruidRel<?>) rel).getDatasourceNames().stream())
-               .distinct()
-               .collect(Collectors.toList());
+               .flatMap(rel -> ((DruidRel<?>) rel).getDataSourceNames().stream())
+               .collect(Collectors.toSet());
   }
 
   @Override

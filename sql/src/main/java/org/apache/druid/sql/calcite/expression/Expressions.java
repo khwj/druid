@@ -39,6 +39,7 @@ import org.apache.druid.math.expr.Expr;
 import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.math.expr.ExprType;
 import org.apache.druid.math.expr.Parser;
+import org.apache.druid.query.aggregation.PostAggregator;
 import org.apache.druid.query.expression.TimestampFloorExprMacro;
 import org.apache.druid.query.extraction.ExtractionFn;
 import org.apache.druid.query.extraction.TimeFormatExtractionFn;
@@ -50,6 +51,7 @@ import org.apache.druid.query.filter.OrDimFilter;
 import org.apache.druid.query.filter.SelectorDimFilter;
 import org.apache.druid.query.ordering.StringComparator;
 import org.apache.druid.query.ordering.StringComparators;
+import org.apache.druid.segment.VirtualColumn;
 import org.apache.druid.segment.column.ColumnHolder;
 import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.sql.calcite.filtration.BoundRefKey;
@@ -57,6 +59,7 @@ import org.apache.druid.sql.calcite.filtration.Bounds;
 import org.apache.druid.sql.calcite.filtration.Filtration;
 import org.apache.druid.sql.calcite.planner.Calcites;
 import org.apache.druid.sql.calcite.planner.PlannerContext;
+import org.apache.druid.sql.calcite.rel.VirtualColumnRegistry;
 import org.apache.druid.sql.calcite.table.RowSignature;
 import org.joda.time.Interval;
 
@@ -85,7 +88,7 @@ public class Expressions
    */
   public static RexNode fromFieldAccess(
       final RowSignature rowSignature,
-      final Project project,
+      @Nullable final Project project,
       final int fieldNumber
   )
   {
@@ -127,6 +130,43 @@ public class Expressions
   }
 
   /**
+   * Translate a list of Calcite {@code RexNode} to Druid expressions, with the possibility of having postagg operands.
+   *
+   * @param plannerContext SQL planner context
+   * @param rowSignature   signature of the rows to be extracted from
+   * @param rexNodes       list of Calcite expressions meant to be applied on top of the rows
+   * @param postAggregatorVisitor visitor that manages postagg names and tracks postaggs that were created as
+   *                              by the translation
+   *
+   * @return list of Druid expressions in the same order as rexNodes, or null if not possible.
+   * If a non-null list is returned, all elements will be non-null.
+   */
+  @Nullable
+  public static List<DruidExpression> toDruidExpressionsWithPostAggOperands(
+      final PlannerContext plannerContext,
+      final RowSignature rowSignature,
+      final List<RexNode> rexNodes,
+      final PostAggregatorVisitor postAggregatorVisitor
+  )
+  {
+    final List<DruidExpression> retVal = new ArrayList<>(rexNodes.size());
+    for (RexNode rexNode : rexNodes) {
+      final DruidExpression druidExpression = toDruidExpressionWithPostAggOperands(
+          plannerContext,
+          rowSignature,
+          rexNode,
+          postAggregatorVisitor
+      );
+      if (druidExpression == null) {
+        return null;
+      }
+
+      retVal.add(druidExpression);
+    }
+    return retVal;
+  }
+
+  /**
    * Translate a Calcite {@code RexNode} to a Druid expressions.
    *
    * @param plannerContext SQL planner context
@@ -142,63 +182,133 @@ public class Expressions
       final RexNode rexNode
   )
   {
+    return toDruidExpressionWithPostAggOperands(
+        plannerContext,
+        rowSignature,
+        rexNode,
+        null
+    );
+  }
+
+  @Nullable
+  public static DruidExpression toDruidExpressionWithPostAggOperands(
+      final PlannerContext plannerContext,
+      final RowSignature rowSignature,
+      final RexNode rexNode,
+      @Nullable final PostAggregatorVisitor postAggregatorVisitor
+  )
+  {
     final SqlKind kind = rexNode.getKind();
-    final SqlTypeName sqlTypeName = rexNode.getType().getSqlTypeName();
-
     if (kind == SqlKind.INPUT_REF) {
-      // Translate field references.
-      final RexInputRef ref = (RexInputRef) rexNode;
-      final String columnName = rowSignature.getRowOrder().get(ref.getIndex());
-      if (columnName == null) {
-        throw new ISE("WTF?! Expression referred to nonexistent index[%d]", ref.getIndex());
-      }
-
-      return DruidExpression.fromColumn(columnName);
+      return inputRefToDruidExpression(rowSignature, rexNode);
     } else if (rexNode instanceof RexCall) {
-      final SqlOperator operator = ((RexCall) rexNode).getOperator();
-
-      final SqlOperatorConversion conversion = plannerContext.getOperatorTable()
-                                                             .lookupOperatorConversion(operator);
-
-      if (conversion == null) {
-        return null;
-      } else {
-        return conversion.toDruidExpression(plannerContext, rowSignature, rexNode);
-      }
+      return rexCallToDruidExpression(plannerContext, rowSignature, rexNode, postAggregatorVisitor);
     } else if (kind == SqlKind.LITERAL) {
-      // Translate literal.
-      if (RexLiteral.isNullLiteral(rexNode)) {
-        return DruidExpression.fromExpression(DruidExpression.nullLiteral());
-      } else if (SqlTypeName.NUMERIC_TYPES.contains(sqlTypeName)) {
-        return DruidExpression.fromExpression(DruidExpression.numberLiteral((Number) RexLiteral.value(rexNode)));
-      } else if (SqlTypeFamily.INTERVAL_DAY_TIME == sqlTypeName.getFamily()) {
-        // Calcite represents DAY-TIME intervals in milliseconds.
-        final long milliseconds = ((Number) RexLiteral.value(rexNode)).longValue();
-        return DruidExpression.fromExpression(DruidExpression.numberLiteral(milliseconds));
-      } else if (SqlTypeFamily.INTERVAL_YEAR_MONTH == sqlTypeName.getFamily()) {
-        // Calcite represents YEAR-MONTH intervals in months.
-        final long months = ((Number) RexLiteral.value(rexNode)).longValue();
-        return DruidExpression.fromExpression(DruidExpression.numberLiteral(months));
-      } else if (SqlTypeName.STRING_TYPES.contains(sqlTypeName)) {
-        return DruidExpression.fromExpression(DruidExpression.stringLiteral(RexLiteral.stringValue(rexNode)));
-      } else if (SqlTypeName.TIMESTAMP == sqlTypeName || SqlTypeName.DATE == sqlTypeName) {
-        if (RexLiteral.isNullLiteral(rexNode)) {
-          return DruidExpression.fromExpression(DruidExpression.nullLiteral());
-        } else {
-          return DruidExpression.fromExpression(
-              DruidExpression.numberLiteral(
-                  Calcites.calciteDateTimeLiteralToJoda(rexNode, plannerContext.getTimeZone()).getMillis()
-              )
-          );
-        }
-      } else if (SqlTypeName.BOOLEAN == sqlTypeName) {
-        return DruidExpression.fromExpression(DruidExpression.numberLiteral(RexLiteral.booleanValue(rexNode) ? 1 : 0));
-      } else {
-        // Can't translate other literals.
-        return null;
-      }
+      return literalToDruidExpression(plannerContext, rexNode);
     } else {
       // Can't translate.
+      return null;
+    }
+  }
+
+  private static DruidExpression inputRefToDruidExpression(
+      final RowSignature rowSignature,
+      final RexNode rexNode
+  )
+  {
+    // Translate field references.
+    final RexInputRef ref = (RexInputRef) rexNode;
+    final String columnName = rowSignature.getRowOrder().get(ref.getIndex());
+    if (columnName == null) {
+      throw new ISE("WTF?! Expression referred to nonexistent index[%d]", ref.getIndex());
+    }
+
+    return DruidExpression.fromColumn(columnName);
+  }
+
+  private static DruidExpression rexCallToDruidExpression(
+      final PlannerContext plannerContext,
+      final RowSignature rowSignature,
+      final RexNode rexNode,
+      final PostAggregatorVisitor postAggregatorVisitor
+  )
+  {
+    final SqlOperator operator = ((RexCall) rexNode).getOperator();
+
+    final SqlOperatorConversion conversion = plannerContext.getOperatorTable()
+                                                           .lookupOperatorConversion(operator);
+
+    if (conversion == null) {
+      return null;
+    } else {
+
+      if (postAggregatorVisitor != null) {
+        // try making postagg first
+        PostAggregator postAggregator = conversion.toPostAggregator(
+            plannerContext,
+            rowSignature,
+            rexNode,
+            postAggregatorVisitor
+        );
+
+        if (postAggregator != null) {
+          postAggregatorVisitor.addPostAgg(postAggregator);
+          String exprName = postAggregator.getName();
+          return DruidExpression.of(SimpleExtraction.of(exprName, null), exprName);
+        }
+      }
+
+      DruidExpression expression = conversion.toDruidExpressionWithPostAggOperands(
+          plannerContext,
+          rowSignature,
+          rexNode,
+          postAggregatorVisitor
+      );
+
+      if (expression == null) {
+        return null;
+      } else {
+        return expression;
+      }
+    }
+  }
+
+  private static DruidExpression literalToDruidExpression(
+      final PlannerContext plannerContext,
+      final RexNode rexNode
+  )
+  {
+    final SqlTypeName sqlTypeName = rexNode.getType().getSqlTypeName();
+
+    // Translate literal.
+    if (RexLiteral.isNullLiteral(rexNode)) {
+      return DruidExpression.fromExpression(DruidExpression.nullLiteral());
+    } else if (SqlTypeName.NUMERIC_TYPES.contains(sqlTypeName)) {
+      return DruidExpression.fromExpression(DruidExpression.numberLiteral((Number) RexLiteral.value(rexNode)));
+    } else if (SqlTypeFamily.INTERVAL_DAY_TIME == sqlTypeName.getFamily()) {
+      // Calcite represents DAY-TIME intervals in milliseconds.
+      final long milliseconds = ((Number) RexLiteral.value(rexNode)).longValue();
+      return DruidExpression.fromExpression(DruidExpression.numberLiteral(milliseconds));
+    } else if (SqlTypeFamily.INTERVAL_YEAR_MONTH == sqlTypeName.getFamily()) {
+      // Calcite represents YEAR-MONTH intervals in months.
+      final long months = ((Number) RexLiteral.value(rexNode)).longValue();
+      return DruidExpression.fromExpression(DruidExpression.numberLiteral(months));
+    } else if (SqlTypeName.STRING_TYPES.contains(sqlTypeName)) {
+      return DruidExpression.fromExpression(DruidExpression.stringLiteral(RexLiteral.stringValue(rexNode)));
+    } else if (SqlTypeName.TIMESTAMP == sqlTypeName || SqlTypeName.DATE == sqlTypeName) {
+      if (RexLiteral.isNullLiteral(rexNode)) {
+        return DruidExpression.fromExpression(DruidExpression.nullLiteral());
+      } else {
+        return DruidExpression.fromExpression(
+            DruidExpression.numberLiteral(
+                Calcites.calciteDateTimeLiteralToJoda(rexNode, plannerContext.getTimeZone()).getMillis()
+            )
+        );
+      }
+    } else if (SqlTypeName.BOOLEAN == sqlTypeName) {
+      return DruidExpression.fromExpression(DruidExpression.numberLiteral(RexLiteral.booleanValue(rexNode) ? 1 : 0));
+    } else {
+      // Can't translate other literals.
       return null;
     }
   }
@@ -206,28 +316,45 @@ public class Expressions
   /**
    * Translates "condition" to a Druid filter, or returns null if we cannot translate the condition.
    *
-   * @param plannerContext planner context
-   * @param rowSignature   row signature of the dataSource to be filtered
-   * @param expression     Calcite row expression
+   * @param plannerContext        planner context
+   * @param rowSignature          input row signature
+   * @param virtualColumnRegistry re-usable virtual column references, may be null if virtual columns aren't allowed
+   * @param expression            Calcite row expression
    */
   @Nullable
   public static DimFilter toFilter(
       final PlannerContext plannerContext,
       final RowSignature rowSignature,
+      @Nullable final VirtualColumnRegistry virtualColumnRegistry,
       final RexNode expression
   )
   {
     final SqlKind kind = expression.getKind();
 
     if (kind == SqlKind.IS_TRUE || kind == SqlKind.IS_NOT_FALSE) {
-      return toFilter(plannerContext, rowSignature, Iterables.getOnlyElement(((RexCall) expression).getOperands()));
+      return toFilter(
+          plannerContext,
+          rowSignature,
+          virtualColumnRegistry,
+          Iterables.getOnlyElement(((RexCall) expression).getOperands())
+      );
     } else if (kind == SqlKind.IS_FALSE || kind == SqlKind.IS_NOT_TRUE) {
       return new NotDimFilter(
-          toFilter(plannerContext, rowSignature, Iterables.getOnlyElement(((RexCall) expression).getOperands()))
+          toFilter(
+              plannerContext,
+              rowSignature,
+              virtualColumnRegistry,
+              Iterables.getOnlyElement(((RexCall) expression).getOperands())
+          )
       );
     } else if (kind == SqlKind.CAST && expression.getType().getSqlTypeName() == SqlTypeName.BOOLEAN) {
       // Calcite sometimes leaves errant, useless cast-to-booleans inside filters. Strip them and continue.
-      return toFilter(plannerContext, rowSignature, Iterables.getOnlyElement(((RexCall) expression).getOperands()));
+      return toFilter(
+          plannerContext,
+          rowSignature,
+          virtualColumnRegistry,
+          Iterables.getOnlyElement(((RexCall) expression).getOperands())
+      );
     } else if (kind == SqlKind.AND
                || kind == SqlKind.OR
                || kind == SqlKind.NOT) {
@@ -236,6 +363,7 @@ public class Expressions
         final DimFilter nextFilter = toFilter(
             plannerContext,
             rowSignature,
+            virtualColumnRegistry,
             rexNode
         );
         if (nextFilter == null) {
@@ -254,7 +382,7 @@ public class Expressions
       }
     } else {
       // Handle filter conditions on everything else.
-      return toLeafFilter(plannerContext, rowSignature, expression);
+      return toLeafFilter(plannerContext, rowSignature, virtualColumnRegistry, expression);
     }
   }
 
@@ -262,14 +390,16 @@ public class Expressions
    * Translates "condition" to a Druid filter, assuming it does not contain any boolean expressions. Returns null
    * if we cannot translate the condition.
    *
-   * @param plannerContext planner context
-   * @param rowSignature   row signature of the dataSource to be filtered
-   * @param rexNode        Calcite row expression
+   * @param plannerContext        planner context
+   * @param rowSignature          input row signature
+   * @param virtualColumnRegistry re-usable virtual column references, may be null if virtual columns aren't allowed
+   * @param rexNode               Calcite row expression
    */
   @Nullable
   private static DimFilter toLeafFilter(
       final PlannerContext plannerContext,
       final RowSignature rowSignature,
+      @Nullable final VirtualColumnRegistry virtualColumnRegistry,
       final RexNode rexNode
   )
   {
@@ -279,17 +409,31 @@ public class Expressions
       return Filtration.matchNothing();
     }
 
-    final DimFilter simpleFilter = toSimpleLeafFilter(plannerContext, rowSignature, rexNode);
-    return simpleFilter != null ? simpleFilter : toExpressionLeafFilter(plannerContext, rowSignature, rexNode);
+    final DimFilter simpleFilter = toSimpleLeafFilter(
+        plannerContext,
+        rowSignature,
+        virtualColumnRegistry,
+        rexNode
+    );
+    return simpleFilter != null
+           ? simpleFilter
+           : toExpressionLeafFilter(plannerContext, rowSignature, rexNode);
   }
 
   /**
-   * Translates to a simple leaf filter, meaning one that hits just a single column and is not an expression filter.
+   * Translates to a simple leaf filter, i.e. not an "expression" type filter. Note that the filter may still
+   * reference expression virtual columns, if and only if "virtualColumnRegistry" is defined.
+   *
+   * @param plannerContext        planner context
+   * @param rowSignature          input row signature
+   * @param virtualColumnRegistry re-usable virtual column references, may be null if virtual columns aren't allowed
+   * @param rexNode               Calcite row expression
    */
   @Nullable
   private static DimFilter toSimpleLeafFilter(
       final PlannerContext plannerContext,
       final RowSignature rowSignature,
+      @Nullable final VirtualColumnRegistry virtualColumnRegistry,
       final RexNode rexNode
   )
   {
@@ -299,6 +443,7 @@ public class Expressions
       return toSimpleLeafFilter(
           plannerContext,
           rowSignature,
+          virtualColumnRegistry,
           Iterables.getOnlyElement(((RexCall) rexNode).getOperands())
       );
     } else if (kind == SqlKind.IS_FALSE || kind == SqlKind.IS_NOT_TRUE) {
@@ -306,23 +451,40 @@ public class Expressions
           toSimpleLeafFilter(
               plannerContext,
               rowSignature,
+              virtualColumnRegistry,
               Iterables.getOnlyElement(((RexCall) rexNode).getOperands())
           )
       );
     } else if (kind == SqlKind.IS_NULL || kind == SqlKind.IS_NOT_NULL) {
       final RexNode operand = Iterables.getOnlyElement(((RexCall) rexNode).getOperands());
 
-      // operand must be translatable to a SimpleExtraction to be simple-filterable
       final DruidExpression druidExpression = toDruidExpression(plannerContext, rowSignature, operand);
-      if (druidExpression == null || !druidExpression.isSimpleExtraction()) {
+      if (druidExpression == null) {
         return null;
       }
 
-      final DimFilter equalFilter = new SelectorDimFilter(
-          druidExpression.getSimpleExtraction().getColumn(),
-          NullHandling.defaultStringValue(),
-          druidExpression.getSimpleExtraction().getExtractionFn()
-      );
+      final DimFilter equalFilter;
+      if (druidExpression.isSimpleExtraction()) {
+        equalFilter = new SelectorDimFilter(
+            druidExpression.getSimpleExtraction().getColumn(),
+            NullHandling.defaultStringValue(),
+            druidExpression.getSimpleExtraction().getExtractionFn()
+        );
+      } else if (virtualColumnRegistry != null) {
+        final VirtualColumn virtualColumn = virtualColumnRegistry.getOrCreateVirtualColumnForExpression(
+            plannerContext,
+            druidExpression,
+            operand.getType().getSqlTypeName()
+        );
+
+        equalFilter = new SelectorDimFilter(
+            virtualColumn.getOutputName(),
+            NullHandling.defaultStringValue(),
+            null
+        );
+      } else {
+        return null;
+      }
 
       return kind == SqlKind.IS_NOT_NULL ? new NotDimFilter(equalFilter) : equalFilter;
     } else if (kind == SqlKind.EQUALS
@@ -392,13 +554,23 @@ public class Expressions
         return buildTimeFloorFilter(ColumnHolder.TIME_COLUMN_NAME, queryGranularity, flippedKind, rhsMillis);
       }
 
-      // In the general case, lhs must be translatable to a SimpleExtraction to be simple-filterable.
-      if (!lhsExpression.isSimpleExtraction()) {
+      final String column;
+      final ExtractionFn extractionFn;
+      if (lhsExpression.isSimpleExtraction()) {
+        column = lhsExpression.getSimpleExtraction().getColumn();
+        extractionFn = lhsExpression.getSimpleExtraction().getExtractionFn();
+      } else if (virtualColumnRegistry != null) {
+        VirtualColumn virtualLhs = virtualColumnRegistry.getOrCreateVirtualColumnForExpression(
+            plannerContext,
+            lhsExpression,
+            lhs.getType().getSqlTypeName()
+        );
+
+        column = virtualLhs.getOutputName();
+        extractionFn = null;
+      } else {
         return null;
       }
-
-      final String column = lhsExpression.getSimpleExtraction().getColumn();
-      final ExtractionFn extractionFn = lhsExpression.getSimpleExtraction().getExtractionFn();
 
       if (column.equals(ColumnHolder.TIME_COLUMN_NAME) && extractionFn instanceof TimeFormatExtractionFn) {
         // Check if we can strip the extractionFn and convert the filter to a direct filter on __time.
@@ -470,39 +642,15 @@ public class Expressions
       return filter;
     } else if (rexNode instanceof RexCall) {
       final SqlOperator operator = ((RexCall) rexNode).getOperator();
-
-      final SqlOperatorConversion conversion =
-          plannerContext.getOperatorTable().lookupOperatorConversion(operator);
+      final SqlOperatorConversion conversion = plannerContext.getOperatorTable().lookupOperatorConversion(operator);
 
       if (conversion == null) {
         return null;
       } else {
-        DimFilter filter = conversion.toDruidFilter(plannerContext, rowSignature, rexNode);
-        if (filter != null) {
-          return filter;
-        }
-        DruidExpression expression = conversion.toDruidExpression(plannerContext, rowSignature, rexNode);
-        if (expression != null) {
-          return new ExpressionDimFilter(expression.getExpression(), plannerContext.getExprMacroTable());
-        }
+        return conversion.toDruidFilter(plannerContext, rowSignature, virtualColumnRegistry, rexNode);
       }
-    }
-    return null;
-  }
-
-
-  public static ExprType exprTypeForValueType(final ValueType valueType)
-  {
-    switch (valueType) {
-      case LONG:
-        return ExprType.LONG;
-      case FLOAT:
-      case DOUBLE:
-        return ExprType.DOUBLE;
-      case STRING:
-        return ExprType.STRING;
-      default:
-        throw new ISE("No ExprType for valueType[%s]", valueType);
+    } else {
+      return null;
     }
   }
 
@@ -517,9 +665,24 @@ public class Expressions
   )
   {
     final DruidExpression druidExpression = toDruidExpression(plannerContext, rowSignature, rexNode);
-    return druidExpression == null
-           ? null
-           : new ExpressionDimFilter(druidExpression.getExpression(), plannerContext.getExprMacroTable());
+    return druidExpression != null
+           ? new ExpressionDimFilter(druidExpression.getExpression(), plannerContext.getExprMacroTable())
+           : null;
+  }
+
+  public static ExprType exprTypeForValueType(final ValueType valueType)
+  {
+    switch (valueType) {
+      case LONG:
+        return ExprType.LONG;
+      case FLOAT:
+      case DOUBLE:
+        return ExprType.DOUBLE;
+      case STRING:
+        return ExprType.STRING;
+      default:
+        throw new ISE("No ExprType for valueType[%s]", valueType);
+    }
   }
 
   /**
@@ -540,7 +703,7 @@ public class Expressions
     final Expr arg = expr.getArg();
     final Granularity granularity = expr.getGranularity();
 
-    if (ColumnHolder.TIME_COLUMN_NAME.equals(Parser.getIdentifierIfIdentifier(arg))) {
+    if (ColumnHolder.TIME_COLUMN_NAME.equals(arg.getBindingIfIdentifier())) {
       return granularity;
     } else {
       return null;

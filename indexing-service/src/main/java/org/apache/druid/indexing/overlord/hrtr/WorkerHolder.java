@@ -45,7 +45,6 @@ import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.joda.time.DateTime;
 
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -55,6 +54,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -70,7 +70,6 @@ public class WorkerHolder
   {
   };
 
-  private static final StatusResponseHandler RESPONSE_HANDLER = new StatusResponseHandler(StandardCharsets.UTF_8);
 
   private final Worker worker;
   private Worker disabledWorker;
@@ -78,7 +77,7 @@ public class WorkerHolder
   protected final AtomicBoolean disabled;
 
   // Known list of tasks running/completed on this worker.
-  protected final AtomicReference<Map<String, TaskAnnouncement>> tasksSnapshotRef = new AtomicReference<>(new ConcurrentHashMap<>());
+  protected final AtomicReference<Map<String, TaskAnnouncement>> tasksSnapshotRef;
 
   private final AtomicReference<DateTime> lastCompletedTaskTime = new AtomicReference<>(DateTimes.nowUtc());
   private final AtomicReference<DateTime> blacklistedUntil = new AtomicReference<>();
@@ -98,7 +97,8 @@ public class WorkerHolder
       HttpRemoteTaskRunnerConfig config,
       ScheduledExecutorService workersSyncExec,
       Listener listener,
-      Worker worker
+      Worker worker,
+      List<TaskAnnouncement> knownAnnouncements
   )
   {
     this.smileMapper = smileMapper;
@@ -120,6 +120,12 @@ public class WorkerHolder
         config.getServerUnstabilityTimeout().toStandardDuration().getMillis(),
         createSyncListener()
     );
+
+    ConcurrentMap<String, TaskAnnouncement> announcements = new ConcurrentHashMap<>();
+    if (knownAnnouncements != null) {
+      knownAnnouncements.forEach(e -> announcements.put(e.getTaskId(), e));
+    }
+    tasksSnapshotRef = new AtomicReference<>(announcements);
   }
 
   public Worker getWorker()
@@ -177,7 +183,8 @@ public class WorkerHolder
             worker.getHost(),
             worker.getIp(),
             worker.getCapacity(),
-            ""
+            "",
+            worker.getCategory()
         );
       }
       w = disabledWorker;
@@ -230,7 +237,7 @@ public class WorkerHolder
                   new Request(HttpMethod.POST, url)
                       .addHeader(HttpHeaders.Names.CONTENT_TYPE, SmileMediaTypes.APPLICATION_JACKSON_SMILE)
                       .setContent(smileMapper.writeValueAsBytes(task)),
-                  RESPONSE_HANDLER,
+                  StatusResponseHandler.getInstance(),
                   config.getAssignRequestHttpTimeout().toStandardDuration()
               ).get();
 
@@ -275,7 +282,7 @@ public class WorkerHolder
             try {
               final StatusResponseHolder response = httpClient.go(
                   new Request(HttpMethod.POST, url),
-                  RESPONSE_HANDLER,
+                  StatusResponseHandler.getInstance(),
                   config.getShutdownRequestHttpTimeout().toStandardDuration()
               ).get();
 
@@ -320,9 +327,25 @@ public class WorkerHolder
 
   public void waitForInitialization() throws InterruptedException
   {
-    if (!syncer.awaitInitialization(3 * syncer.getServerHttpTimeout())) {
+    if (!syncer.awaitInitialization(3 * syncer.getServerHttpTimeout(), TimeUnit.MILLISECONDS)) {
       throw new RE("Failed to sync with worker[%s].", worker.getHost());
     }
+  }
+
+  public boolean isInitialized()
+  {
+    try {
+      return syncer.awaitInitialization(1, TimeUnit.MILLISECONDS);
+    }
+    catch (InterruptedException ignored) {
+      Thread.currentThread().interrupt();
+      return false;
+    }
+  }
+
+  public boolean isEnabled()
+  {
+    return !disabled.get();
   }
 
   public ChangeRequestHttpSyncer<WorkerHistoryItem> getUnderlyingSyncer()

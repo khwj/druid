@@ -34,11 +34,11 @@ import org.apache.druid.segment.QueryableIndexSegment;
 import org.apache.druid.segment.Segment;
 import org.apache.druid.segment.TestIndex;
 import org.apache.druid.segment.column.ValueType;
+import org.apache.druid.timeline.SegmentId;
 import org.junit.Assert;
 import org.junit.Test;
 
 import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -46,27 +46,27 @@ import java.util.Map;
  */
 public class SegmentAnalyzerTest
 {
-  private static final EnumSet<SegmentMetadataQuery.AnalysisType> emptyAnalyses =
+  private static final EnumSet<SegmentMetadataQuery.AnalysisType> EMPTY_ANALYSES =
       EnumSet.noneOf(SegmentMetadataQuery.AnalysisType.class);
 
   @Test
   public void testIncrementalWorks()
   {
     testIncrementalWorksHelper(null);
-    testIncrementalWorksHelper(emptyAnalyses);
+    testIncrementalWorksHelper(EMPTY_ANALYSES);
   }
 
   private void testIncrementalWorksHelper(EnumSet<SegmentMetadataQuery.AnalysisType> analyses)
   {
     final List<SegmentAnalysis> results = getSegmentAnalysises(
-        new IncrementalIndexSegment(TestIndex.getIncrementalTestIndex(), null),
+        new IncrementalIndexSegment(TestIndex.getIncrementalTestIndex(), SegmentId.dummy("ds")),
         analyses
     );
 
     Assert.assertEquals(1, results.size());
 
     final SegmentAnalysis analysis = results.get(0);
-    Assert.assertEquals(null, analysis.getId());
+    Assert.assertEquals(SegmentId.dummy("ds").toString(), analysis.getId());
 
     final Map<String, ColumnAnalysis> columns = analysis.getColumns();
 
@@ -112,20 +112,20 @@ public class SegmentAnalyzerTest
   public void testMappedWorks()
   {
     testMappedWorksHelper(null);
-    testMappedWorksHelper(emptyAnalyses);
+    testMappedWorksHelper(EMPTY_ANALYSES);
   }
 
   private void testMappedWorksHelper(EnumSet<SegmentMetadataQuery.AnalysisType> analyses)
   {
     final List<SegmentAnalysis> results = getSegmentAnalysises(
-        new QueryableIndexSegment("test_1", TestIndex.getMMappedTestIndex()),
+        new QueryableIndexSegment(TestIndex.getMMappedTestIndex(), SegmentId.dummy("test_1")),
         analyses
     );
 
     Assert.assertEquals(1, results.size());
 
     final SegmentAnalysis analysis = results.get(0);
-    Assert.assertEquals("test_1", analysis.getId());
+    Assert.assertEquals(SegmentId.dummy("test_1").toString(), analysis.getId());
 
     final Map<String, ColumnAnalysis> columns = analysis.getColumns();
     Assert.assertEquals(
@@ -192,7 +192,6 @@ public class SegmentAnalyzerTest
     final SegmentMetadataQuery query = new SegmentMetadataQuery(
         new LegacyDataSource("test"), new LegacySegmentSpec("2011/2012"), null, null, null, analyses, false, false
     );
-    HashMap<String, Object> context = new HashMap<String, Object>();
-    return runner.run(QueryPlus.wrap(query), context).toList();
+    return runner.run(QueryPlus.wrap(query)).toList();
   }
 }
